@@ -1,0 +1,32 @@
+{
+  "name": "broker-mds",
+  "version": "0.1.0",
+  "description": "Market Data Service: single quotes gateway of the broker platform (ADR-024). Provider keys live ONLY here; canonical symbols; socket.io fan-out speaking the site's FeedDriver contract.",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "socket.io": "^4.7.5",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.12",
+    "socket.io-client": "^4.7.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.0.5"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  }
+}

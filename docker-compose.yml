@@ -1,0 +1,12 @@
+# MDS: docker compose up -d --build   (БД нет — сервис stateless)
+services:
+  mds:
+    build: .
+    ports:
+      - '3003:3003'
+    environment:
+      # Каталог инструментов — из CMS на хосте; без неё живёт на фолбэке
+      CMS_API_URL: http://host.docker.internal:3001/v1
+      CMS_API_KEY: dev-cms-api-key
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
