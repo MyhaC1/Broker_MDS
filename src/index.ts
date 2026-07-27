@@ -1,7 +1,7 @@
 import 'dotenv/config';
 
 import { createServer } from 'node:http';
-import { startCatalog } from './catalog.js';
+import { CATALOG } from './catalog.js';
 import { config } from './config.js';
 import { QuoteHub } from './hub.js';
 import { BinanceProvider } from './providers/binance.js';
@@ -11,10 +11,12 @@ import { BinanceProvider } from './providers/binance.js';
  * Stateless: последние котировки в памяти, восстанавливаются от провайдера
  * за секунды после рестарта. Ключи провайдеров живут ТОЛЬКО здесь
  * (Binance public — без ключа; платные придут с проверкой лицензий, R-T5).
+ * Каталог (вселенная стримящихся инструментов) — статический src/catalog.ts;
+ * CMS выбирает из него инструменты сайтов, зависимости от CMS нет.
  *
  * REST:
- *   GET /health                 — статус сервиса/провайдера/каталога
- *   GET /v1/instruments         — канонический каталог (что реально стримим)
+ *   GET /health                 — статус сервиса/провайдера
+ *   GET /v1/instruments         — вселенная (что реально стримим)
  *   GET /v1/quotes?symbols=A,B  — снапшот котировок
  * WS (socket.io) — контракт FeedDriver сайта: subscribe/unsubscribe → quotes:batch
  */
@@ -25,15 +27,10 @@ const httpServer = createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   if (url.pathname === '/health') {
-    const catalogState = catalog.current();
     const body = {
       status: provider.status === 'connected' ? 'ok' : 'degraded',
       provider: { name: 'binance', status: provider.status, lastTickAt: provider.lastTickAt },
-      catalog: {
-        source: catalogState.source,
-        instruments: catalogState.instruments.length,
-        updatedAt: catalogState.updatedAt,
-      },
+      catalog: { source: 'static', instruments: CATALOG.length },
       clients: hub.clientCount,
       uptimeSec: Math.round((Date.now() - startedAt) / 1000),
       time: new Date().toISOString(),
@@ -45,7 +42,7 @@ const httpServer = createServer((req, res) => {
 
   if (url.pathname === '/v1/instruments') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ items: catalog.current().instruments }));
+    res.end(JSON.stringify({ items: CATALOG }));
     return;
   }
 
@@ -62,11 +59,8 @@ const httpServer = createServer((req, res) => {
 
 const hub = new QuoteHub(httpServer);
 const provider = new BinanceProvider((quote) => hub.push(quote));
-const catalog = startCatalog((state) => {
-  console.info(`[catalog] ${state.instruments.length} instruments (source: ${state.source})`);
-  provider.setInstruments(state.instruments);
-});
+provider.setInstruments(CATALOG);
 
 httpServer.listen(config.port, () => {
-  console.info(`[mds] listening on :${config.port}`);
+  console.info(`[mds] listening on :${config.port} (${CATALOG.length} instruments)`);
 });
