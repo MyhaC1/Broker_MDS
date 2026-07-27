@@ -1,7 +1,7 @@
 import 'dotenv/config';
 
 import { createServer } from 'node:http';
-import { CATALOG } from './catalog.js';
+import { CATALOG, groupLabelFor } from './catalog.js';
 import { config } from './config.js';
 import { QuoteHub } from './hub.js';
 import { iconPathFor, iconSvg } from './icons.js';
@@ -37,14 +37,18 @@ const httpServer = createServer((req, res) => {
       uptimeSec: Math.round((Date.now() - startedAt) / 1000),
       time: new Date().toISOString(),
     };
-    res.writeHead(provider.status === 'connected' ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.writeHead(provider.status === 'connected' ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(body));
     return;
   }
 
   if (url.pathname === '/v1/instruments') {
-    const items = CATALOG.map((i) => ({ ...i, icon: iconPathFor(i.symbol) }));
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const items = CATALOG.map((i) => ({
+      ...i,
+      icon: iconPathFor(i.symbol),
+      group: groupLabelFor(i),
+    }));
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ items }));
     return;
   }
@@ -59,7 +63,7 @@ const httpServer = createServer((req, res) => {
       });
       res.end(svg);
     } else {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: 'not_found' }));
     }
     return;
@@ -67,12 +71,12 @@ const httpServer = createServer((req, res) => {
 
   if (url.pathname === '/v1/quotes') {
     const symbols = url.searchParams.get('symbols')?.split(',').filter(Boolean);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ items: hub.snapshot(symbols) }));
     return;
   }
 
-  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify({ error: 'not_found' }));
 });
 

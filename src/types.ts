@@ -10,11 +10,22 @@ export interface Quote {
   ts: number;
 }
 
+/**
+ * Сегмент внутри категории (таксономия платформы):
+ * акции и индексы — по регионам (Европа/Азия/Америка/РФ),
+ * валюта — по ликвидности (мажоры/миноры/экзотика).
+ * Сырьё сегментов не имеет — «все возможные активы» одной группой
+ * (metals/energy уже разведены на уровне category).
+ */
+export type Segment = 'europe' | 'asia' | 'america' | 'rf' | 'major' | 'minor' | 'exotic';
+
 /** Инструмент каталога: канонический символ платформы + маппинг на провайдера. */
 export interface CatalogInstrument {
   symbol: string;
   name: string;
   category: Quote['category'];
+  /** null — категория без сегментов (крипта) */
+  segment: Segment | null;
   digits: number;
   provider: 'binance';
   providerSymbol: string;

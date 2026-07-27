@@ -15,6 +15,14 @@ describe('вселенная инструментов', () => {
     expect(new Set(CATALOG.map((i) => i.symbol)).size).toBe(CATALOG.length);
   });
 
+  it('метка группы: категория и категория — сегмент', async () => {
+    const { groupLabelFor } = await import('./catalog.js');
+    expect(groupLabelFor({ category: 'crypto', segment: null })).toBe('Криптовалюты');
+    expect(groupLabelFor({ category: 'stocks', segment: 'europe' })).toBe('Акции — Европа');
+    expect(groupLabelFor({ category: 'forex', segment: 'exotic' })).toBe('Валюта — Экзотика');
+    expect(groupLabelFor({ category: 'indices', segment: 'rf' })).toBe('Индексы — РФ');
+  });
+
   it('у каждого инструмента вселенной есть иконка в public/icons', async () => {
     const { iconPathFor } = await import('./icons.js');
     for (const i of CATALOG) {

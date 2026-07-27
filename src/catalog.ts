@@ -1,4 +1,4 @@
-import type { CatalogInstrument } from './types.js';
+import type { CatalogInstrument, Quote, Segment } from './types.js';
 
 /**
  * Вселенная MDS: что провайдер реально стримит. Source of truth — ЗДЕСЬ
@@ -32,7 +32,42 @@ export const CATALOG: CatalogInstrument[] = CRYPTO_UNIVERSE.map(([symbol, name, 
   symbol,
   name,
   category: 'crypto' as const,
+  segment: null,
   digits,
   provider: 'binance' as const,
   providerSymbol: binanceSymbolFor(symbol),
 }));
+
+/* ------------------------------------------------------------------ */
+/* Группировка для потребителей (селект в админке CMS и т.п.)          */
+/* ------------------------------------------------------------------ */
+
+const CATEGORY_RU: Record<Quote['category'], string> = {
+  crypto: 'Криптовалюты',
+  forex: 'Валюта',
+  stocks: 'Акции',
+  indices: 'Индексы',
+  metals: 'Сырьё — металлы',
+  energy: 'Сырьё — энергетика',
+};
+
+const SEGMENT_RU: Record<Segment, string> = {
+  europe: 'Европа',
+  asia: 'Азия',
+  america: 'Америка',
+  rf: 'РФ',
+  major: 'Мажоры',
+  minor: 'Миноры',
+  exotic: 'Экзотика',
+};
+
+/**
+ * Человекочитаемая метка группы инструмента («Акции — Европа»).
+ * Уходит в /v1/instruments полем group: потребители группируют по ней
+ * как по данным — новые категории/сегменты появляются у них
+ * автоматически, без своих деплоев.
+ */
+export function groupLabelFor(i: Pick<CatalogInstrument, 'category' | 'segment'>): string {
+  const category = CATEGORY_RU[i.category] ?? i.category;
+  return i.segment ? `${category} — ${SEGMENT_RU[i.segment] ?? i.segment}` : category;
+}
