@@ -14,6 +14,13 @@ describe('вселенная инструментов', () => {
     expect(CATALOG.every((i) => i.provider === 'binance' && i.category === 'crypto')).toBe(true);
     expect(new Set(CATALOG.map((i) => i.symbol)).size).toBe(CATALOG.length);
   });
+
+  it('у каждого инструмента вселенной есть иконка в public/icons', async () => {
+    const { iconPathFor } = await import('./icons.js');
+    for (const i of CATALOG) {
+      expect(iconPathFor(i.symbol), i.symbol).toBe(`/icons/${i.symbol}.svg`);
+    }
+  });
 });
 
 describe('normalizeTick (Binance @ticker → Quote контракта сайта)', () => {

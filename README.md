@@ -8,7 +8,7 @@
 
 - **Сайты** — socket.io, контракт `FeedDriver` сайта дословно: клиент шлёт `subscribe`/`unsubscribe` (список канонических символов), сервер — `quotes:batch` (`Quote[]`, батч ~250 мс, на subscribe сразу снапшот). Подключение сайта = смена `NEXT_PUBLIC_WS_URL` на MDS.
 - **Терминал** (по плану ADR-024) — меняет upstream с прямого Binance на MDS; символы уже канонические, маппинг у терминала снимается.
-- **REST**: `GET /health` · `GET /v1/instruments` (что реально стримим) · `GET /v1/quotes?symbols=BTCUSD,ETHUSD` (снапшот).
+- **REST**: `GET /health` · `GET /v1/instruments` (что реально стримим; каждый инструмент несёт относительный путь `icon`) · `GET /v1/quotes?symbols=BTCUSD,ETHUSD` (снапшот) · `GET /icons/<SYMBOL>.svg` (иконки монет, набор MIT cryptocurrency-icons в `public/icons/`).
 
 ## Источники
 

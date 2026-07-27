@@ -17,6 +17,7 @@ RUN addgroup -S app && adduser -S app -G app
 COPY --from=build --chown=app:app /app/node_modules ./node_modules
 COPY --from=build --chown=app:app /app/dist ./dist
 COPY --from=build --chown=app:app /app/package.json ./
+COPY --chown=app:app public ./public
 USER app
 EXPOSE 3003
 CMD ["node", "dist/index.js"]

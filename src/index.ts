@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { CATALOG } from './catalog.js';
 import { config } from './config.js';
 import { QuoteHub } from './hub.js';
+import { iconPathFor, iconSvg } from './icons.js';
 import { BinanceProvider } from './providers/binance.js';
 
 /**
@@ -16,8 +17,9 @@ import { BinanceProvider } from './providers/binance.js';
  *
  * REST:
  *   GET /health                 — статус сервиса/провайдера
- *   GET /v1/instruments         — вселенная (что реально стримим)
+ *   GET /v1/instruments         — вселенная (что реально стримим, + icon)
  *   GET /v1/quotes?symbols=A,B  — снапшот котировок
+ *   GET /icons/<SYMBOL>.svg     — иконка инструмента
  * WS (socket.io) — контракт FeedDriver сайта: subscribe/unsubscribe → quotes:batch
  */
 
@@ -41,8 +43,25 @@ const httpServer = createServer((req, res) => {
   }
 
   if (url.pathname === '/v1/instruments') {
+    const items = CATALOG.map((i) => ({ ...i, icon: iconPathFor(i.symbol) }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ items: CATALOG }));
+    res.end(JSON.stringify({ items }));
+    return;
+  }
+
+  const iconMatch = url.pathname.match(/^\/icons\/([A-Z0-9]{1,20})\.svg$/);
+  if (iconMatch) {
+    const svg = iconSvg(iconMatch[1]!);
+    if (svg) {
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml',
+        'Cache-Control': 'public, max-age=86400, immutable',
+      });
+      res.end(svg);
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not_found' }));
+    }
     return;
   }
 
