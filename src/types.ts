@@ -27,6 +27,6 @@ export interface CatalogInstrument {
   /** null — категория без сегментов (крипта) */
   segment: Segment | null;
   digits: number;
-  provider: 'binance';
+  provider: 'binance' | 'twelvedata';
   providerSymbol: string;
 }

@@ -9,10 +9,21 @@ describe('вселенная инструментов', () => {
     expect(binanceSymbolFor('XRPUSD')).toBe('xrpusdt');
   });
 
-  it('каталог статический, все — binance/crypto, символы уникальны', () => {
-    expect(CATALOG.length).toBeGreaterThanOrEqual(12);
-    expect(CATALOG.every((i) => i.provider === 'binance' && i.category === 'crypto')).toBe(true);
+  it('каталог статический, два провайдера, символы уникальны', () => {
+    expect(CATALOG.length).toBeGreaterThanOrEqual(29);
     expect(new Set(CATALOG.map((i) => i.symbol)).size).toBe(CATALOG.length);
+    const crypto = CATALOG.filter((i) => i.category === 'crypto');
+    expect(crypto.length).toBeGreaterThanOrEqual(12);
+    expect(crypto.every((i) => i.provider === 'binance')).toBe(true);
+    const twelve = CATALOG.filter((i) => i.provider === 'twelvedata');
+    expect(twelve.length).toBeGreaterThanOrEqual(17);
+    // Заявленная таксономия присутствует
+    const has = (category: string, segment: string | null) =>
+      CATALOG.some((i) => i.category === category && i.segment === segment);
+    expect(has('forex', 'major') && has('forex', 'minor') && has('forex', 'exotic')).toBe(true);
+    expect(has('stocks', 'america')).toBe(true);
+    expect(has('indices', 'america') && has('indices', 'europe')).toBe(true);
+    expect(has('metals', null)).toBe(true);
   });
 
   it('метка группы: категория и категория — сегмент', async () => {
@@ -28,6 +39,33 @@ describe('вселенная инструментов', () => {
     for (const i of CATALOG) {
       expect(iconPathFor(i.symbol), i.symbol).toBe(`/icons/${i.symbol}.svg`);
     }
+  });
+});
+
+describe('normalizeTwelveQuote (Twelve Data /quote → Quote контракта сайта)', () => {
+  it('нормализует ответ /quote', async () => {
+    const { normalizeTwelveQuote } = await import('./providers/twelvedata.js');
+    const eurusd = CATALOG.find((i) => i.symbol === 'EURUSD')!;
+    const quote = normalizeTwelveQuote(
+      { symbol: 'EUR/USD', close: '1.08543', percent_change: '-0.25', timestamp: 1784990000 },
+      eurusd,
+    );
+    expect(quote).toEqual({
+      symbol: 'EURUSD',
+      name: 'EUR/USD',
+      category: 'forex',
+      price: 1.08543,
+      digits: 5,
+      changePercent: -0.25,
+      ts: 1784990000000,
+    });
+  });
+
+  it('мусорная цена отбрасывается, отсутствующий percent_change → 0', async () => {
+    const { normalizeTwelveQuote } = await import('./providers/twelvedata.js');
+    const eurusd = CATALOG.find((i) => i.symbol === 'EURUSD')!;
+    expect(normalizeTwelveQuote({ close: 'abc' }, eurusd)).toBeNull();
+    expect(normalizeTwelveQuote({ close: '1.1' }, eurusd)?.changePercent).toBe(0);
   });
 });
 

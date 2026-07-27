@@ -1,6 +1,11 @@
 # MDS: docker compose up -d --build   (БД нет — сервис stateless)
+# Ключи провайдеров — из .env рядом (compose подхватывает сам)
 services:
   mds:
     build: .
     ports:
       - '3003:3003'
+    environment:
+      TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
+      TWELVEDATA_CREDITS_PER_MIN: ${TWELVEDATA_CREDITS_PER_MIN:-8}
+      TWELVEDATA_CREDITS_PER_DAY: ${TWELVEDATA_CREDITS_PER_DAY:-800}
