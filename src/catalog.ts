@@ -28,6 +28,71 @@ export function binanceSymbolFor(canonical: string): string {
   return canonical.replace(/USD$/, 'USDT').toLowerCase();
 }
 
+/** Красивые имена для мажоров (остальным — тикер базовой монеты). */
+const CRYPTO_NAMES: Record<string, string> = Object.fromEntries(
+  CRYPTO_UNIVERSE.map(([symbol, name]) => [symbol.replace(/USD$/, ''), name]),
+);
+
+/** Число знаков после запятой из tickSize Binance ("0.00010000" → 4). */
+export function digitsFromTickSize(tickSize: string): number {
+  const trimmed = tickSize.replace(/0+$/, '');
+  const dot = trimmed.indexOf('.');
+  return dot === -1 ? 0 : trimmed.length - dot - 1;
+}
+
+interface ExchangeInfoSymbol {
+  symbol: string;
+  baseAsset: string;
+  quoteAsset: string;
+  status: string;
+  isSpotTradingAllowed?: boolean;
+  filters?: { filterType: string; tickSize?: string }[];
+}
+
+/**
+ * Полная вселенная спота Binance к USDT из /api/v3/exchangeInfo
+ * (решение пользователя — «вся крипта Binance»). Живые цены идут одним
+ * стримом !ticker@arr, поэтому сотни пар почти ничего не стоят.
+ * Плечевые токены (UP/DOWN/BULL/BEAR) исключены — их цена движется
+ * обманчиво. Сеть недоступна → null, index падает на статический фолбэк.
+ */
+export async function fetchBinanceSpotUniverse(
+  apiUrl: string,
+): Promise<CatalogInstrument[] | null> {
+  try {
+    const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/v3/exchangeInfo`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as { symbols?: ExchangeInfoSymbol[] };
+
+    const seen = new Set<string>();
+    const out: CatalogInstrument[] = [];
+    for (const s of data.symbols ?? []) {
+      if (s.quoteAsset !== 'USDT' || s.status !== 'TRADING') continue;
+      if (s.isSpotTradingAllowed === false) continue;
+      if (/(UP|DOWN|BULL|BEAR)$/.test(s.baseAsset)) continue;
+      const canonical = `${s.baseAsset}USD`;
+      if (seen.has(canonical)) continue;
+      seen.add(canonical);
+      const tick = s.filters?.find((f) => f.filterType === 'PRICE_FILTER')?.tickSize;
+      out.push({
+        symbol: canonical,
+        name: CRYPTO_NAMES[s.baseAsset] ?? s.baseAsset,
+        category: 'crypto',
+        segment: null,
+        digits: tick ? digitsFromTickSize(tick) : 2,
+        provider: 'binance',
+        providerSymbol: s.symbol.toLowerCase(),
+      });
+    }
+    return out.length > 0 ? out : null;
+  } catch (error) {
+    console.warn('[binance] exchangeInfo fail:', (error as Error).message);
+    return null;
+  }
+}
+
 /**
  * Вселенная Twelve Data: форекс/металлы/акции/индексы.
  * [символ платформы, имя, категория, сегмент, digits, символ провайдера].

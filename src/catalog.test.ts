@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { binanceSymbolFor, CATALOG } from './catalog.js';
+import { binanceSymbolFor, CATALOG, digitsFromTickSize } from './catalog.js';
 import { normalizeTick } from './providers/binance.js';
 import type { CatalogInstrument } from './types.js';
 
@@ -7,6 +7,13 @@ describe('вселенная инструментов', () => {
   it('канонический USD → binance USDT lowercase', () => {
     expect(binanceSymbolFor('BTCUSD')).toBe('btcusdt');
     expect(binanceSymbolFor('XRPUSD')).toBe('xrpusdt');
+  });
+
+  it('digitsFromTickSize: число знаков из tickSize', () => {
+    expect(digitsFromTickSize('0.01000000')).toBe(2);
+    expect(digitsFromTickSize('0.00010000')).toBe(4);
+    expect(digitsFromTickSize('1.00000000')).toBe(0);
+    expect(digitsFromTickSize('0.00000001')).toBe(8);
   });
 
   it('каталог статический, два провайдера, символы уникальны', () => {

@@ -4,6 +4,8 @@ export const config = {
   /** Период батча quotes:batch на клиента (контракт драйвера сайта: ~250 мс) */
   batchMs: Number(process.env.BATCH_MS ?? 250),
   binanceWsUrl: process.env.BINANCE_WS_URL ?? 'wss://stream.binance.com:9443',
+  /** REST Binance для автозагрузки каталога (exchangeInfo). */
+  binanceApiUrl: process.env.BINANCE_API_URL ?? 'https://api.binance.com',
 
   /**
    * Twelve Data (форекс/металлы/акции/индексы). Ключ живёт ТОЛЬКО здесь

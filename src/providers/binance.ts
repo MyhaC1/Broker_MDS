@@ -3,11 +3,18 @@ import { config } from '../config.js';
 import type { CatalogInstrument, Quote } from '../types.js';
 
 /**
- * Провайдер Binance: combined stream `<symbol>@ticker` (24h-статистика,
- * lastPrice + priceChangePercent). Публичные данные, ключ не нужен.
- * Reconnect с экспоненциальным backoff; Binance рвёт соединение каждые 24ч —
- * это штатно. Смена каталога → пересоединение с новым списком стримов.
+ * Провайдер Binance: raw-сокет /ws + SUBSCRIBE на `<symbol>@ticker` по
+ * всем парам вселенной (24h-статистика: lastPrice + priceChangePercent).
+ * Публичные данные, ключ не нужен. Лимит Binance — 1024 стрима на
+ * соединение; подписку шлём чанками по 500 (и ≤5 сообщений/сек).
+ * Всеобщий `!ticker@arr` не используем — в нашей сети он не отдаёт кадров.
+ * Reconnect с backoff; разрыв каждые 24ч у Binance штатный.
  */
+
+// Лимит Binance на размер одного WS-сообщения (~8 КБ → «Payload too long»):
+// держим чанк маленьким. Плюс лимит 5 сообщений/сек — шлём с задержкой.
+const MAX_STREAMS_PER_MSG = 100;
+const SUBSCRIBE_STAGGER_MS = 300;
 
 interface BinanceTicker {
   e: string; // "24hrTicker"
@@ -50,49 +57,58 @@ export class BinanceProvider {
 
   constructor(private readonly onQuote: (q: Quote) => void) {}
 
+  /** Пары вселенной; на них подписываемся при (пере)соединении. */
   setInstruments(instruments: CatalogInstrument[]) {
-    const same =
-      instruments.length === this.instruments.length &&
-      instruments.every((i, n) => i.providerSymbol === this.instruments[n]?.providerSymbol);
     this.instruments = instruments;
     this.bySymbol = new Map(instruments.map((i) => [i.providerSymbol, i]));
-    if (!same) this.reconnect();
   }
 
-  private streamUrl(): string {
-    const streams = this.instruments.map((i) => `${i.providerSymbol}@ticker`).join('/');
-    return `${config.binanceWsUrl}/stream?streams=${streams}`;
-  }
-
-  private reconnect() {
-    this.closedByUs = true;
-    this.ws?.close();
-    this.ws = null;
-    this.closedByUs = false;
-    this.connect();
+  /**
+   * Подписка на @ticker всех пар вселенной: чанки по 100 (иначе Binance
+   * рвёт «Payload too long») с задержкой (лимит 5 сообщений/сек).
+   * Лимит 1024 стрима на соединение — при большем нужен шардинг по сокетам.
+   */
+  private subscribe(ws: WebSocket) {
+    if (this.instruments.length > 1024) {
+      console.warn(
+        `[binance] ${this.instruments.length} пар > лимит 1024/соединение — нужен шардинг по сокетам`,
+      );
+    }
+    const streams = this.instruments.map((i) => `${i.providerSymbol}@ticker`);
+    const chunks: string[][] = [];
+    for (let n = 0; n < streams.length; n += MAX_STREAMS_PER_MSG) {
+      chunks.push(streams.slice(n, n + MAX_STREAMS_PER_MSG));
+    }
+    chunks.forEach((params, idx) => {
+      setTimeout(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ method: 'SUBSCRIBE', params, id: idx + 1 }));
+        }
+      }, idx * SUBSCRIBE_STAGGER_MS).unref();
+    });
   }
 
   connect() {
-    if (this.instruments.length === 0) return;
     this.status = this.attempts === 0 ? 'connecting' : 'reconnecting';
-    const ws = new WebSocket(this.streamUrl());
+    const ws = new WebSocket(`${config.binanceWsUrl}/ws`);
     this.ws = ws;
 
     ws.on('open', () => {
       this.attempts = 0;
       this.status = 'connected';
-      console.info(`[binance] connected: ${this.instruments.length} streams`);
+      this.subscribe(ws);
+      console.info(`[binance] connected: подписка на ${this.instruments.length} пар @ticker`);
     });
 
     ws.on('message', (raw) => {
       try {
-        const message = JSON.parse(String(raw)) as { data?: BinanceTicker };
-        if (message.data?.e === '24hrTicker') {
-          const quote = normalizeTick(message.data, this.bySymbol);
-          if (quote) {
-            this.lastTickAt = Date.now();
-            this.onQuote(quote);
-          }
+        // Кадр — либо ack подписки ({result,id}), либо тикер 24hrTicker
+        const ticker = JSON.parse(String(raw)) as BinanceTicker;
+        if (ticker.e !== '24hrTicker') return;
+        const quote = normalizeTick(ticker, this.bySymbol);
+        if (quote) {
+          this.lastTickAt = Date.now();
+          this.onQuote(quote);
         }
       } catch {
         // мусорный кадр — игнор

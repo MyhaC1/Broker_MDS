@@ -2,7 +2,7 @@ import 'dotenv/config';
 
 import { createServer } from 'node:http';
 
-import { CATALOG, groupLabelFor } from './catalog.js';
+import { CATALOG, fetchBinanceSpotUniverse, groupLabelFor } from './catalog.js';
 import { config } from './config.js';
 import { QuoteHub } from './hub.js';
 import { iconPathFor, iconSvg } from './icons.js';
@@ -26,14 +26,37 @@ import { TwelveDataProvider } from './providers/twelvedata.js';
  * WS (socket.io) — контракт FeedDriver сайта: subscribe/unsubscribe → quotes:batch
  */
 
-// Без ключа Twelve Data его инструменты выпадают из вселенной:
-// в /v1/instruments только то, что РЕАЛЬНО стримится
-const universe = config.twelveData.apiKey
-  ? CATALOG
-  : CATALOG.filter((i) => i.provider !== 'twelvedata');
-if (!config.twelveData.apiKey) {
-  console.warn('[mds] TWELVEDATA_API_KEY не задан — вселенная только Binance (крипта)');
+// Крипта — вся спот-вселенная Binance к USDT (exchangeInfo); сеть
+// недоступна → статический фолбэк из CATALOG (12 мажоров), сервис живёт
+let cryptoUniverse = await fetchBinanceSpotUniverse(config.binanceApiUrl);
+let catalogSource = 'binance-exchangeInfo';
+if (!cryptoUniverse) {
+  cryptoUniverse = CATALOG.filter((i) => i.provider === 'binance');
+  catalogSource = 'static-fallback';
+  console.warn(`[mds] exchangeInfo недоступен — крипта из фолбэка (${cryptoUniverse.length})`);
+} else {
+  console.info(`[mds] Binance: ${cryptoUniverse.length} спот-пар к USDT`);
 }
+
+// Twelve Data — по ключу; без ключа его инструменты выпадают из вселенной
+const twelveUniverse = config.twelveData.apiKey
+  ? CATALOG.filter((i) => i.provider === 'twelvedata')
+  : [];
+if (!config.twelveData.apiKey) {
+  console.warn('[mds] TWELVEDATA_API_KEY не задан — вселенная только Binance');
+}
+
+// Коллизии канонического символа: Binance EUR/USDT и форекс EUR/USD оба
+// дают «EURUSD». Реальный форекс/актив Twelve Data приоритетнее крипто-пары
+// к USDT — иначе стейблкоин-пара Binance перезапишет настоящий инструмент.
+const twelveSymbols = new Set(twelveUniverse.map((i) => i.symbol));
+const cryptoDeduped = cryptoUniverse.filter((i) => !twelveSymbols.has(i.symbol));
+const collisions = cryptoUniverse.length - cryptoDeduped.length;
+if (collisions > 0) {
+  console.info(`[mds] ${collisions} крипто-пар скрыто коллизией с Twelve Data (форекс приоритетнее)`);
+}
+
+const universe = [...cryptoDeduped, ...twelveUniverse];
 
 const startedAt = Date.now();
 const httpServer = createServer((req, res) => {
@@ -51,7 +74,7 @@ const httpServer = createServer((req, res) => {
     const body = {
       status: allConnected ? 'ok' : 'degraded',
       providers,
-      catalog: { source: 'static', instruments: universe.length },
+      catalog: { source: catalogSource, instruments: universe.length },
       clients: hub.clientCount,
       uptimeSec: Math.round((Date.now() - startedAt) / 1000),
       time: new Date().toISOString(),
@@ -111,6 +134,7 @@ const hub = new QuoteHub(httpServer);
 
 const binance = new BinanceProvider((quote) => hub.push(quote));
 binance.setInstruments(universe.filter((i) => i.provider === 'binance'));
+binance.connect();
 
 const twelve = config.twelveData.apiKey
   ? new TwelveDataProvider((quote) => hub.push(quote), config.twelveData)
