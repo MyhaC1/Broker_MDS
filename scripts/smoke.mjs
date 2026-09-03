@@ -11,14 +11,27 @@ for (let i = 0; i < 30; i++) {
   try {
     const res = await fetch(`${MDS}/health`);
     health = await res.json();
-    if (res.ok && health.provider.lastTickAt > 0) break;
+    if (res.ok && health.providers?.some((p) => p.lastTickAt > 0)) break;
   } catch {}
   await new Promise((r) => setTimeout(r, 1000));
 }
-check(health?.status === 'ok' && health.provider.status === 'connected', `health: provider=${health?.provider?.status}, catalog=${health?.catalog?.source} (${health?.catalog?.instruments})`);
+// /health отдаёт МАССИВ providers (с 2f26a72, Twelve Data). Смоук требует
+// живого Binance — основного realtime-провайдера; Twelve Data между опросами
+// «connected» не обязан быть, поэтому по нему статус только печатается.
+const binanceHealth = health?.providers?.find((p) => p.name === 'binance');
+check(
+  binanceHealth?.status === 'connected',
+  `health: status=${health?.status}, providers=${health?.providers?.map((p) => `${p.name}:${p.status}`).join(',')}, catalog=${health?.catalog?.source} (${health?.catalog?.instruments})`,
+);
 
 const inst = await (await fetch(`${MDS}/v1/instruments`)).json();
-check(inst.items?.length >= 5 && inst.items.every((i) => i.provider === 'binance'), `instruments: ${inst.items?.map((i) => i.symbol).join(',')}`);
+// Вселенная — сотни инструментов (автозагрузка exchangeInfo), список целиком
+// в лог не печатаем: только размер, провайдеры и первые символы
+const provs = [...new Set(inst.items?.map((i) => i.provider) ?? [])];
+check(
+  inst.items?.length >= 5 && provs.every((p) => ['binance', 'twelvedata'].includes(p)),
+  `instruments: ${inst.items?.length} шт, провайдеры=${provs.join('+')} (${inst.items?.slice(0, 5).map((i) => i.symbol).join(',')}…)`,
+);
 
 const snap = await (await fetch(`${MDS}/v1/quotes?symbols=BTCUSD,ETHUSD`)).json();
 const btc = snap.items?.find((q) => q.symbol === 'BTCUSD');
