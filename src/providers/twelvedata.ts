@@ -51,6 +51,27 @@ export function normalizeTwelveQuote(
   };
 }
 
+/**
+ * Размер батча: 1 символ = 1 кредит, и в один запрос не кладём больше, чем
+ * минутный лимит, иначе упрёмся в него одним обращением.
+ */
+export function chunkSizeFor(cfg: Pick<TwelveDataConfig, 'creditsPerMin'>): number {
+  return Math.max(1, Math.min(cfg.creditsPerMin, 8));
+}
+
+/**
+ * Пауза между запросами: минутный лимит И дневной бюджет (резерв 10%).
+ * Вынесено из класса чистой функцией — по этому числу считается, могут ли
+ * котировки Twelve Data вообще быть свежими (тест-растяжка в
+ * `twelvedata.test.ts`: на free-тарифе интервал 16 минут, и любой разумный
+ * порог свежести делает их протухшими по построению).
+ */
+export function pollIntervalMs(cfg: Pick<TwelveDataConfig, 'creditsPerMin' | 'creditsPerDay'>): number {
+  const dailyBudget = Math.max(1, Math.floor(cfg.creditsPerDay * 0.9));
+  const byDay = Math.ceil((86_400_000 * chunkSizeFor(cfg)) / dailyBudget);
+  return Math.max(60_000, byDay);
+}
+
 export class TwelveDataProvider {
   private instruments: CatalogInstrument[] = [];
   private readonly blacklist = new Set<string>();
@@ -76,14 +97,11 @@ export class TwelveDataProvider {
   }
 
   private get chunkSize(): number {
-    return Math.max(1, Math.min(this.cfg.creditsPerMin, 8));
+    return chunkSizeFor(this.cfg);
   }
 
-  /** Пауза между запросами: минутный лимит И дневной бюджет (резерв 10%). */
   private get intervalMs(): number {
-    const dailyBudget = Math.max(1, Math.floor(this.cfg.creditsPerDay * 0.9));
-    const byDay = Math.ceil((86_400_000 * this.chunkSize) / dailyBudget);
-    return Math.max(60_000, byDay);
+    return pollIntervalMs(this.cfg);
   }
 
   connect() {
@@ -93,7 +111,19 @@ export class TwelveDataProvider {
 
   private schedule(delayMs: number) {
     this.timer = setTimeout(() => void this.poll(), delayMs);
-    this.timer.unref();
+    this.timer.unref?.();
+  }
+
+  /** Остановка поллера (тесты, штатное завершение). */
+  stop() {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  /** Один цикл опроса вручную — для тестов, чтобы не ждать расписания. */
+  async pollOnce(): Promise<void> {
+    await this.poll();
+    this.stop();
   }
 
   private activeChunks(): CatalogInstrument[][] {

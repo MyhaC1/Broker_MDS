@@ -2,6 +2,7 @@ import 'dotenv/config';
 
 import { createServer } from 'node:http';
 
+import { buildHealth, buildQuotes } from './api.js';
 import { CATALOG, fetchBinanceSpotUniverse, groupLabelFor } from './catalog.js';
 import { config } from './config.js';
 import { QuoteHub } from './hub.js';
@@ -58,32 +59,29 @@ if (collisions > 0) {
 
 const universe = [...cryptoDeduped, ...twelveUniverse];
 
+/** Канонический символ → провайдер: для разбивки возрастов в /health. */
+const providerOf = new Map(universe.map((i) => [i.symbol, i.provider]));
+
 const startedAt = Date.now();
 const httpServer = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://mds');
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   if (url.pathname === '/health') {
-    const providers = [
-      { name: 'binance', status: binance.status, lastTickAt: binance.lastTickAt },
-      ...(twelve
-        ? [{ name: 'twelvedata', status: twelve.status, lastTickAt: twelve.lastTickAt }]
-        : []),
-    ];
-    const allConnected = providers.every((p) => p.status === 'connected');
-    const body = {
-      status: allConnected ? 'ok' : 'degraded',
-      providers,
+    const { httpStatus, body } = buildHealth({
+      ages: hub.ages(),
+      providers: [
+        { name: 'binance', lastTickAt: binance.lastTickAt },
+        ...(twelve ? [{ name: 'twelvedata', lastTickAt: twelve.lastTickAt }] : []),
+      ],
+      providerOf,
+      primaryProvider: 'binance',
+      staleAfterMs: config.staleAfterMs,
       catalog: { source: catalogSource, instruments: universe.length },
       clients: hub.clientCount,
-      uptimeSec: Math.round((Date.now() - startedAt) / 1000),
-      time: new Date().toISOString(),
-    };
-    // 200 пока жив хотя бы основной realtime-провайдер (Binance):
-    // Twelve Data — поллер, между опросами это не деградация сервиса
-    res.writeHead(binance.status === 'connected' ? 200 : 503, {
-      'Content-Type': 'application/json; charset=utf-8',
+      startedAt,
     });
+    res.writeHead(httpStatus, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(body));
     return;
   }
@@ -122,7 +120,7 @@ const httpServer = createServer((req, res) => {
   if (url.pathname === '/v1/quotes') {
     const symbols = url.searchParams.get('symbols')?.split(',').filter(Boolean);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ items: hub.snapshot(symbols) }));
+    res.end(JSON.stringify(buildQuotes(hub.snapshot(symbols), config.staleAfterMs)));
     return;
   }
 
@@ -142,6 +140,16 @@ const twelve = config.twelveData.apiKey
 if (twelve) {
   twelve.setInstruments(universe.filter((i) => i.provider === 'twelvedata'));
   twelve.connect();
+}
+
+if (config.staleAfterMs === null) {
+  console.error(
+    '[mds] QUOTE_STALE_AFTER_MS не задан. Порог свежести не имеет умолчания ' +
+      '(КОНТРАКТЫ.md §5г): без него MDS не может отличить текущую цену от ' +
+      'вчерашней и НЕ ОТДАЁТ КОТИРОВОК ВОВСЕ — /v1/quotes пуст, /health 503.',
+  );
+} else {
+  console.info(`[mds] порог свежести котировки: ${config.staleAfterMs} мс`);
 }
 
 httpServer.listen(config.port, () => {

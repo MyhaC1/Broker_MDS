@@ -9,6 +9,13 @@ import type { CatalogInstrument, Quote } from '../types.js';
  * соединение; подписку шлём чанками по 500 (и ≤5 сообщений/сек).
  * Всеобщий `!ticker@arr` не используем — в нашей сети он не отдаёт кадров.
  * Reconnect с backoff; разрыв каждые 24ч у Binance штатный.
+ *
+ * **Реконнект стоит на двух ногах, и вторая обязательна (B-003).** События
+ * `close`/`error` ловят разрыв, о котором нам сообщили. При half-open TCP
+ * никто ничего не сообщает: сокет открыт, данных нет, `close` не придёт
+ * никогда. Отсутствие события не является событием — поэтому есть ещё и
+ * таймер тишины: нет опознанного тика `silenceMs` — соединение считается
+ * мёртвым независимо от того, что о себе думает сокет.
  */
 
 // Лимит Binance на размер одного WS-сообщения (~8 КБ → «Payload too long»):
@@ -25,6 +32,13 @@ interface BinanceTicker {
 }
 
 export type ProviderStatus = 'connecting' | 'connected' | 'reconnecting';
+
+export interface BinanceProviderOptions {
+  /** Адрес WS. Вынесен в опции, чтобы тест мог поднять поддельного провайдера. */
+  wsUrl: string;
+  /** Таймер тишины, мс: столько без опознанного тика — соединение мёртвое. */
+  silenceMs: number;
+}
 
 export function normalizeTick(
   data: BinanceTicker,
@@ -52,10 +66,27 @@ export class BinanceProvider {
   private closedByUs = false;
   private instruments: CatalogInstrument[] = [];
   private bySymbol = new Map<string, CatalogInstrument>();
+  private watchdog: ReturnType<typeof setInterval> | null = null;
+  private readonly wsUrl: string;
+  private readonly silenceMs: number;
+  /**
+   * Момент последнего **признака жизни соединения**: открытие сокета либо
+   * опознанный тик. Отдельно от `lastTickAt`, потому что до первого тика
+   * `lastTickAt = 0`, и таймер тишины срывался бы в реконнект сразу же.
+   */
+  private lastSignalAt = 0;
   status: ProviderStatus = 'connecting';
   lastTickAt = 0;
+  /** Сколько раз соединение было признано мёртвым по тишине. Для /health и тестов. */
+  silenceReconnects = 0;
 
-  constructor(private readonly onQuote: (q: Quote) => void) {}
+  constructor(
+    private readonly onQuote: (q: Quote) => void,
+    options?: Partial<BinanceProviderOptions>,
+  ) {
+    this.wsUrl = options?.wsUrl ?? config.binanceWsUrl;
+    this.silenceMs = options?.silenceMs ?? config.providerSilenceMs;
+  }
 
   /** Пары вселенной; на них подписываемся при (пере)соединении. */
   setInstruments(instruments: CatalogInstrument[]) {
@@ -80,22 +111,58 @@ export class BinanceProvider {
       chunks.push(streams.slice(n, n + MAX_STREAMS_PER_MSG));
     }
     chunks.forEach((params, idx) => {
-      setTimeout(() => {
+      const t = setTimeout(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ method: 'SUBSCRIBE', params, id: idx + 1 }));
         }
-      }, idx * SUBSCRIBE_STAGGER_MS).unref();
+      }, idx * SUBSCRIBE_STAGGER_MS);
+      t.unref?.();
     });
   }
 
+  private stopWatchdog() {
+    if (this.watchdog) {
+      clearInterval(this.watchdog);
+      this.watchdog = null;
+    }
+  }
+
+  /**
+   * Таймер тишины. Тикает чаще порога, иначе фактическое обнаружение
+   * растягивается вдвое. `terminate()`, а не `close()`: закрытие с
+   * рукопожатием ждёт ответа той стороны, а её как раз и нет — на half-open
+   * `close()` может висеть до системного таймаута TCP.
+   */
+  private startWatchdog(ws: WebSocket) {
+    this.stopWatchdog();
+    const tick = Math.max(200, Math.floor(this.silenceMs / 3));
+    this.watchdog = setInterval(() => {
+      if (this.ws !== ws) return;
+      const silentFor = Date.now() - this.lastSignalAt;
+      if (silentFor <= this.silenceMs) return;
+      this.silenceReconnects += 1;
+      this.stopWatchdog();
+      this.status = 'reconnecting';
+      console.warn(
+        `[binance] тишина ${silentFor}мс > ${this.silenceMs}мс при открытом сокете — соединение считаем мёртвым (B-003)`,
+      );
+      ws.terminate();
+    }, tick);
+    this.watchdog.unref?.();
+  }
+
   connect() {
+    this.stopWatchdog();
     this.status = this.attempts === 0 ? 'connecting' : 'reconnecting';
-    const ws = new WebSocket(`${config.binanceWsUrl}/ws`);
+    const ws = new WebSocket(`${this.wsUrl}/ws`);
     this.ws = ws;
 
     ws.on('open', () => {
       this.attempts = 0;
       this.status = 'connected';
+      // Отсчёт тишины начинается от открытия, а не от нулевого lastTickAt.
+      this.lastSignalAt = Date.now();
+      this.startWatchdog(ws);
       this.subscribe(ws);
       console.info(`[binance] connected: подписка на ${this.instruments.length} пар @ticker`);
     });
@@ -107,7 +174,11 @@ export class BinanceProvider {
         if (ticker.e !== '24hrTicker') return;
         const quote = normalizeTick(ticker, this.bySymbol);
         if (quote) {
+          // Живость отмечается на ПРИНЯТОМ И ОПОЗНАННОМ сообщении, а не на
+          // любом кадре: иначе ack подписки или мусор продлевали бы жизнь
+          // соединению, по которому котировок нет.
           this.lastTickAt = Date.now();
+          this.lastSignalAt = this.lastTickAt;
           this.onQuote(quote);
         }
       } catch {
@@ -116,18 +187,30 @@ export class BinanceProvider {
     });
 
     const scheduleRetry = () => {
+      // Обработчик устаревшего сокета не должен плодить лишние реконнекты.
+      if (this.ws !== ws) return;
+      this.stopWatchdog();
       if (this.closedByUs) return;
       this.status = 'reconnecting';
       const delay = Math.min(1_000 * 2 ** this.attempts, 30_000);
       this.attempts += 1;
       console.warn(`[binance] reconnect in ${delay}ms (attempt ${this.attempts})`);
-      setTimeout(() => this.connect(), delay).unref();
+      const t = setTimeout(() => this.connect(), delay);
+      t.unref?.();
     };
 
     ws.on('close', scheduleRetry);
     ws.on('error', (error) => {
       console.warn('[binance] ws error:', (error as Error).message);
-      ws.close();
+      ws.terminate();
     });
+  }
+
+  /** Остановка провайдера (тесты, штатное завершение). */
+  stop() {
+    this.closedByUs = true;
+    this.stopWatchdog();
+    this.ws?.terminate();
+    this.ws = null;
   }
 }
