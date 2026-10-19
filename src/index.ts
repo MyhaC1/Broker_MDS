@@ -1,151 +1,111 @@
 import 'dotenv/config';
 
-import { createServer } from 'node:http';
-
-import { CATALOG, fetchBinanceSpotUniverse, groupLabelFor } from './catalog.js';
+import { CATALOG, fetchBinanceSpotUniverse } from './catalog.js';
 import { config } from './config.js';
-import { QuoteHub } from './hub.js';
-import { iconPathFor, iconSvg } from './icons.js';
-import { BinanceProvider } from './providers/binance.js';
-import { TwelveDataProvider } from './providers/twelvedata.js';
+import { loadRegistry } from './registry-store.js';
+import { createMdsServer } from './server.js';
+import type { ProviderEntry } from './registry.js';
 
 /**
  * MDS — Market Data Service (ADR-024 платформы).
- * Stateless: последние котировки в памяти, восстанавливаются от провайдеров
- * за секунды после рестарта. Ключи провайдеров живут ТОЛЬКО здесь:
- * Binance (крипта, public без ключа) + Twelve Data (форекс/металлы/акции/
- * индексы, ключ в env) — параллельно, каждый стримит свою часть вселенной.
- * Каталог (вселенная стримящихся инструментов) — статический src/catalog.ts;
- * CMS выбирает из него инструменты сайтов, зависимости от CMS нет.
+ * Stateless по котировкам: последние цены в памяти, восстанавливаются от
+ * источников за секунды после рестарта. Ключи источников живут ТОЛЬКО здесь.
+ *
+ * С Р-047 набор источников — **не свойство сборки, а настраиваемое
+ * состояние**: реестр провайдеров лежит файлом, читается при старте и
+ * меняется служебной ручкой `/v1/admin/providers`, которую зовёт админка CMS
+ * сервер-сервером. Направление связи только такое: MDS от CMS не зависит и
+ * зависеть не должен — иначе контентная система станет точкой отказа
+ * торговой.
+ *
+ * Этот файл — только запуск: вся проводка в `server.ts`, чтобы её можно было
+ * поднять в тесте целиком.
  *
  * REST:
- *   GET /health                 — статус сервиса и провайдеров
- *   GET /v1/instruments         — вселенная (что реально стримим, + icon/group)
- *   GET /v1/quotes?symbols=A,B  — снапшот котировок
- *   GET /icons/<SYMBOL>.svg     — иконка инструмента
+ *   GET  /health                 — состояние сервиса, источников и реестра
+ *   GET  /v1/instruments         — вселенная (+ catalogSource, покрытие)
+ *   GET  /v1/quotes?symbols=A,B  — снапшот + причины недоступности по каждому
+ *   GET  /icons/<SYMBOL>.svg     — иконка инструмента
+ *   GET  /v1/admin/providers     — реестр (секрет, сервер-сервер)
+ *   PUT  /v1/admin/providers     — смена реестра (секрет, сервер-сервер)
+ *   GET  /v1/admin/audit         — журнал изменений реестра в памяти
  * WS (socket.io) — контракт FeedDriver сайта: subscribe/unsubscribe → quotes:batch
  */
 
-// Крипта — вся спот-вселенная Binance к USDT (exchangeInfo); сеть
-// недоступна → статический фолбэк из CATALOG (12 мажоров), сервис живёт
 let cryptoUniverse = await fetchBinanceSpotUniverse(config.binanceApiUrl);
 let catalogSource = 'binance-exchangeInfo';
 if (!cryptoUniverse) {
   cryptoUniverse = CATALOG.filter((i) => i.provider === 'binance');
   catalogSource = 'static-fallback';
-  console.warn(`[mds] exchangeInfo недоступен — крипта из фолбэка (${cryptoUniverse.length})`);
+  console.warn(
+    `[mds] exchangeInfo недоступен — крипта из ЗАПАСНОГО каталога (${cryptoUniverse.length} инструментов). ` +
+      'Это число не является размером живой вселенной.',
+  );
 } else {
   console.info(`[mds] Binance: ${cryptoUniverse.length} спот-пар к USDT`);
 }
 
-// Twelve Data — по ключу; без ключа его инструменты выпадают из вселенной
-const twelveUniverse = config.twelveData.apiKey
-  ? CATALOG.filter((i) => i.provider === 'twelvedata')
-  : [];
-if (!config.twelveData.apiKey) {
-  console.warn('[mds] TWELVEDATA_API_KEY не задан — вселенная только Binance');
+// Каталог — это то, что адаптеры УМЕЮТ стримить. Кто из них что ведёт
+// фактически, решает реестр: записи Twelve Data остаются в каталоге, даже
+// если источник выключен, иначе выключение выглядело бы как исчезновение
+// инструментов из вселенной.
+const catalog = [...cryptoUniverse, ...CATALOG.filter((i) => i.provider === 'twelvedata')];
+
+const loaded = loadRegistry(config.registryPath);
+if (loaded.origin === 'builtin-default') {
+  console.warn(
+    `[mds] реестра провайдеров нет (${loaded.path}) — работаем по ВСТРОЕННОМУ УМОЛЧАНИЮ. ` +
+      'Его никто не выбирал; файл на старте сознательно не создаётся, чтобы ' +
+      '«никто не настраивал» не стало неотличимо от «настроили ровно так».',
+  );
 }
 
-// Коллизии канонического символа: Binance EUR/USDT и форекс EUR/USD оба
-// дают «EURUSD». Реальный форекс/актив Twelve Data приоритетнее крипто-пары
-// к USDT — иначе стейблкоин-пара Binance перезапишет настоящий инструмент.
-const twelveSymbols = new Set(twelveUniverse.map((i) => i.symbol));
-const cryptoDeduped = cryptoUniverse.filter((i) => !twelveSymbols.has(i.symbol));
-const collisions = cryptoUniverse.length - cryptoDeduped.length;
-if (collisions > 0) {
-  console.info(`[mds] ${collisions} крипто-пар скрыто коллизией с Twelve Data (форекс приоритетнее)`);
+/**
+ * Ключ источника. Сначала общий вид `MDS_PROVIDER_KEY_<ID>` — он и делает
+ * добавление второго источника того же адаптера правкой данных плюс одной
+ * переменной, а не правкой кода. Затем исторические переменные, чтобы
+ * существующие развёртки не сломались.
+ */
+function keyFor(entry: ProviderEntry): string {
+  const generic = process.env[`MDS_PROVIDER_KEY_${entry.id.toUpperCase().replace(/-/g, '_')}`];
+  if (generic) return generic;
+  if (entry.adapter === 'twelvedata') return config.twelveData.apiKey;
+  return '';
 }
 
-const universe = [...cryptoDeduped, ...twelveUniverse];
+const keys = new Map((loaded.registry?.providers ?? []).map((p) => [p.id, keyFor(p)]));
 
-const startedAt = Date.now();
-const httpServer = createServer((req, res) => {
-  const url = new URL(req.url ?? '/', 'http://mds');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-
-  if (url.pathname === '/health') {
-    const providers = [
-      { name: 'binance', status: binance.status, lastTickAt: binance.lastTickAt },
-      ...(twelve
-        ? [{ name: 'twelvedata', status: twelve.status, lastTickAt: twelve.lastTickAt }]
-        : []),
-    ];
-    const allConnected = providers.every((p) => p.status === 'connected');
-    const body = {
-      status: allConnected ? 'ok' : 'degraded',
-      providers,
-      catalog: { source: catalogSource, instruments: universe.length },
-      clients: hub.clientCount,
-      uptimeSec: Math.round((Date.now() - startedAt) / 1000),
-      time: new Date().toISOString(),
-    };
-    // 200 пока жив хотя бы основной realtime-провайдер (Binance):
-    // Twelve Data — поллер, между опросами это не деградация сервиса
-    res.writeHead(binance.status === 'connected' ? 200 : 503, {
-      'Content-Type': 'application/json; charset=utf-8',
-    });
-    res.end(JSON.stringify(body));
-    return;
-  }
-
-  if (url.pathname === '/v1/instruments') {
-    // Символы, отвергнутые тарифом провайдера, — не «реально стримятся»
-    const rejected = new Set(twelve?.rejectedSymbols ?? []);
-    const items = universe
-      .filter((i) => !rejected.has(i.symbol))
-      .map((i) => ({
-        ...i,
-        icon: iconPathFor(i.symbol),
-        group: groupLabelFor(i),
-      }));
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ items }));
-    return;
-  }
-
-  const iconMatch = url.pathname.match(/^\/icons\/([A-Z0-9]{1,20})\.svg$/);
-  if (iconMatch) {
-    const svg = iconSvg(iconMatch[1]!);
-    if (svg) {
-      res.writeHead(200, {
-        'Content-Type': 'image/svg+xml',
-        'Cache-Control': 'public, max-age=86400, immutable',
-      });
-      res.end(svg);
-    } else {
-      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: 'not_found' }));
-    }
-    return;
-  }
-
-  if (url.pathname === '/v1/quotes') {
-    const symbols = url.searchParams.get('symbols')?.split(',').filter(Boolean);
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ items: hub.snapshot(symbols) }));
-    return;
-  }
-
-  res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify({ error: 'not_found' }));
+const server = createMdsServer({
+  catalog,
+  catalogSource,
+  loaded,
+  staleAfterMs: config.staleAfterMs,
+  adminToken: config.adminToken,
+  keys,
 });
 
-const hub = new QuoteHub(httpServer);
-
-const binance = new BinanceProvider((quote) => hub.push(quote));
-binance.setInstruments(universe.filter((i) => i.provider === 'binance'));
-binance.connect();
-
-const twelve = config.twelveData.apiKey
-  ? new TwelveDataProvider((quote) => hub.push(quote), config.twelveData)
-  : null;
-if (twelve) {
-  twelve.setInstruments(universe.filter((i) => i.provider === 'twelvedata'));
-  twelve.connect();
+if (config.staleAfterMs === null) {
+  console.error(
+    '[mds] QUOTE_STALE_AFTER_MS не задан. Порог свежести не имеет умолчания ' +
+      '(КОНТРАКТЫ.md §5г): без него MDS не может отличить текущую цену от ' +
+      'вчерашней и НЕ ОТДАЁТ КОТИРОВОК ВОВСЕ — /v1/quotes пуст, /health 503.',
+  );
+} else {
+  console.info(`[mds] порог свежести котировки: ${config.staleAfterMs} мс`);
 }
 
-httpServer.listen(config.port, () => {
+if (config.adminToken === undefined || config.adminToken === '') {
+  console.warn(
+    '[mds] MDS_ADMIN_TOKEN не задан — служебная ручка управления провайдерами ' +
+      'ВЫКЛЮЧЕНА (503). Реестр читается из файла и меняется только правкой файла.',
+  );
+}
+
+server.httpServer.listen(config.port, () => {
+  const table = server.routing();
+  const routed = table ? [...table.routes.values()].filter((r) => r.leader).length : 0;
   console.info(
-    `[mds] listening on :${config.port} (${universe.length} instruments, providers: binance${twelve ? '+twelvedata' : ''})`,
+    `[mds] listening on :${config.port} — каталог ${catalog.length} (${catalogSource}), ` +
+      `маршрутизировано ${routed}, реестр ${loaded.origin} v${loaded.registry?.version ?? '—'}`,
   );
 });

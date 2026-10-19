@@ -56,6 +56,7 @@ describe('normalizeTwelveQuote (Twelve Data /quote → Quote контракта 
     const quote = normalizeTwelveQuote(
       { symbol: 'EUR/USD', close: '1.08543', percent_change: '-0.25', timestamp: 1784990000 },
       eurusd,
+      'twelvedata',
     );
     expect(quote).toEqual({
       symbol: 'EURUSD',
@@ -65,14 +66,15 @@ describe('normalizeTwelveQuote (Twelve Data /quote → Quote контракта 
       digits: 5,
       changePercent: -0.25,
       ts: 1784990000000,
+      source: 'twelvedata',
     });
   });
 
   it('мусорная цена отбрасывается, отсутствующий percent_change → 0', async () => {
     const { normalizeTwelveQuote } = await import('./providers/twelvedata.js');
     const eurusd = CATALOG.find((i) => i.symbol === 'EURUSD')!;
-    expect(normalizeTwelveQuote({ close: 'abc' }, eurusd)).toBeNull();
-    expect(normalizeTwelveQuote({ close: '1.1' }, eurusd)?.changePercent).toBe(0);
+    expect(normalizeTwelveQuote({ close: 'abc' }, eurusd, 'twelvedata')).toBeNull();
+    expect(normalizeTwelveQuote({ close: '1.1' }, eurusd, 'twelvedata')?.changePercent).toBe(0);
   });
 });
 
@@ -83,6 +85,7 @@ describe('normalizeTick (Binance @ticker → Quote контракта сайта
     const quote = normalizeTick(
       { e: '24hrTicker', E: 1784990000000, s: 'BTCUSDT', c: '64034.52', P: '-1.497' },
       bySymbol,
+      'binance',
     );
     expect(quote).toEqual({
       symbol: 'BTCUSD',
@@ -92,11 +95,12 @@ describe('normalizeTick (Binance @ticker → Quote контракта сайта
       digits: 0,
       changePercent: -1.497,
       ts: 1784990000000,
+      source: 'binance',
     });
   });
 
   it('неизвестный символ и мусорные числа отбрасываются', () => {
-    expect(normalizeTick({ e: '24hrTicker', E: 1, s: 'PEPEUSDT', c: '1', P: '1' }, bySymbol)).toBeNull();
-    expect(normalizeTick({ e: '24hrTicker', E: 1, s: 'BTCUSDT', c: 'abc', P: '1' }, bySymbol)).toBeNull();
+    expect(normalizeTick({ e: '24hrTicker', E: 1, s: 'PEPEUSDT', c: '1', P: '1' }, bySymbol, 'binance')).toBeNull();
+    expect(normalizeTick({ e: '24hrTicker', E: 1, s: 'BTCUSDT', c: 'abc', P: '1' }, bySymbol, 'binance')).toBeNull();
   });
 });

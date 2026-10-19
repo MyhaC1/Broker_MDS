@@ -27,6 +27,8 @@ interface TwelveQuote {
 }
 
 export interface TwelveDataConfig {
+  /** id источника из реестра провайдеров: уходит в `Quote.source` (Р-047). */
+  id: string;
   apiKey: string;
   apiUrl: string;
   creditsPerMin: number;
@@ -36,6 +38,7 @@ export interface TwelveDataConfig {
 export function normalizeTwelveQuote(
   entry: TwelveQuote,
   instrument: CatalogInstrument,
+  sourceId: string,
 ): Quote | null {
   const price = Number.parseFloat(entry.close ?? '');
   const changePercent = Number.parseFloat(entry.percent_change ?? '');
@@ -48,7 +51,29 @@ export function normalizeTwelveQuote(
     digits: instrument.digits,
     changePercent: Number.isFinite(changePercent) ? changePercent : 0,
     ts: entry.timestamp ? entry.timestamp * 1000 : Date.now(),
+    source: sourceId,
   };
+}
+
+/**
+ * Размер батча: 1 символ = 1 кредит, и в один запрос не кладём больше, чем
+ * минутный лимит, иначе упрёмся в него одним обращением.
+ */
+export function chunkSizeFor(cfg: Pick<TwelveDataConfig, 'creditsPerMin'>): number {
+  return Math.max(1, Math.min(cfg.creditsPerMin, 8));
+}
+
+/**
+ * Пауза между запросами: минутный лимит И дневной бюджет (резерв 10%).
+ * Вынесено из класса чистой функцией — по этому числу считается, могут ли
+ * котировки Twelve Data вообще быть свежими (тест-растяжка в
+ * `twelvedata.test.ts`: на free-тарифе интервал 16 минут, и любой разумный
+ * порог свежести делает их протухшими по построению).
+ */
+export function pollIntervalMs(cfg: Pick<TwelveDataConfig, 'creditsPerMin' | 'creditsPerDay'>): number {
+  const dailyBudget = Math.max(1, Math.floor(cfg.creditsPerDay * 0.9));
+  const byDay = Math.ceil((86_400_000 * chunkSizeFor(cfg)) / dailyBudget);
+  return Math.max(60_000, byDay);
 }
 
 export class TwelveDataProvider {
@@ -71,19 +96,20 @@ export class TwelveDataProvider {
     private readonly cfg: TwelveDataConfig,
   ) {}
 
+  get id(): string {
+    return this.cfg.id;
+  }
+
   setInstruments(instruments: CatalogInstrument[]) {
     this.instruments = instruments;
   }
 
   private get chunkSize(): number {
-    return Math.max(1, Math.min(this.cfg.creditsPerMin, 8));
+    return chunkSizeFor(this.cfg);
   }
 
-  /** Пауза между запросами: минутный лимит И дневной бюджет (резерв 10%). */
   private get intervalMs(): number {
-    const dailyBudget = Math.max(1, Math.floor(this.cfg.creditsPerDay * 0.9));
-    const byDay = Math.ceil((86_400_000 * this.chunkSize) / dailyBudget);
-    return Math.max(60_000, byDay);
+    return pollIntervalMs(this.cfg);
   }
 
   connect() {
@@ -93,7 +119,19 @@ export class TwelveDataProvider {
 
   private schedule(delayMs: number) {
     this.timer = setTimeout(() => void this.poll(), delayMs);
-    this.timer.unref();
+    this.timer.unref?.();
+  }
+
+  /** Остановка поллера (тесты, штатное завершение). */
+  stop() {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  /** Один цикл опроса вручную — для тестов, чтобы не ждать расписания. */
+  async pollOnce(): Promise<void> {
+    await this.poll();
+    this.stop();
   }
 
   private activeChunks(): CatalogInstrument[][] {
@@ -140,7 +178,7 @@ export class TwelveDataProvider {
           );
           continue;
         }
-        const quote = normalizeTwelveQuote(entry, instrument);
+        const quote = normalizeTwelveQuote(entry, instrument, this.cfg.id);
         if (quote) {
           gotAny = true;
           this.lastTickAt = Date.now();
