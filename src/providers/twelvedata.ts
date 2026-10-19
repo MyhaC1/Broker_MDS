@@ -27,6 +27,8 @@ interface TwelveQuote {
 }
 
 export interface TwelveDataConfig {
+  /** id источника из реестра провайдеров: уходит в `Quote.source` (Р-047). */
+  id: string;
   apiKey: string;
   apiUrl: string;
   creditsPerMin: number;
@@ -36,6 +38,7 @@ export interface TwelveDataConfig {
 export function normalizeTwelveQuote(
   entry: TwelveQuote,
   instrument: CatalogInstrument,
+  sourceId: string,
 ): Quote | null {
   const price = Number.parseFloat(entry.close ?? '');
   const changePercent = Number.parseFloat(entry.percent_change ?? '');
@@ -48,6 +51,7 @@ export function normalizeTwelveQuote(
     digits: instrument.digits,
     changePercent: Number.isFinite(changePercent) ? changePercent : 0,
     ts: entry.timestamp ? entry.timestamp * 1000 : Date.now(),
+    source: sourceId,
   };
 }
 
@@ -91,6 +95,10 @@ export class TwelveDataProvider {
     private readonly onQuote: (q: Quote) => void,
     private readonly cfg: TwelveDataConfig,
   ) {}
+
+  get id(): string {
+    return this.cfg.id;
+  }
 
   setInstruments(instruments: CatalogInstrument[]) {
     this.instruments = instruments;
@@ -170,7 +178,7 @@ export class TwelveDataProvider {
           );
           continue;
         }
-        const quote = normalizeTwelveQuote(entry, instrument);
+        const quote = normalizeTwelveQuote(entry, instrument, this.cfg.id);
         if (quote) {
           gotAny = true;
           this.lastTickAt = Date.now();

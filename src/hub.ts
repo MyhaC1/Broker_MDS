@@ -24,11 +24,17 @@ import type { Quote } from './types.js';
  *                     не означает «всё свежо» — КОНТРАКТЫ.md §5г.
  *  - `checked`      — сколько символов осмотрено: охват проверки, без него
  *                     «протухших нет» неотличимо от «проверять было нечего».
+ *  - `missing`      — из запрошенных символов те, цены которых в памяти нет
+ *                     вовсе. Отличать обязательно: «цена есть, но старая» и
+ *                     «цены нет» — разные состояния с разными причинами, а
+ *                     раньше оба выглядели как отсутствие строки в ответе.
+ *                     Символы никто не запрашивал → `[]`: нечего называть.
  */
 export interface SnapshotResult {
   items: Quote[];
   staleSymbols: string[] | null;
   checked: number;
+  missing: string[];
 }
 
 export interface HubOptions {
@@ -131,10 +137,11 @@ export class QuoteHub {
    */
   snapshot(symbols?: string[]): SnapshotResult {
     const at = this.now();
-    const candidates =
-      !symbols || symbols.length === 0
-        ? [...this.last.values()]
-        : symbols.map((s) => this.last.get(s)).filter((q): q is Quote => q !== undefined);
+    const asked = symbols && symbols.length > 0 ? symbols : null;
+    const candidates = asked
+      ? asked.map((s) => this.last.get(s)).filter((q): q is Quote => q !== undefined)
+      : [...this.last.values()];
+    const missing = asked ? asked.filter((s) => !this.last.has(s)) : [];
 
     const items: Quote[] = [];
     const staleSymbols: string[] = [];
@@ -149,7 +156,32 @@ export class QuoteHub {
       // `[]` здесь соврало бы ровно то, против чего написано §5г.
       staleSymbols: this.staleAfterMs === null ? null : staleSymbols,
       checked: candidates.length,
+      missing,
     };
+  }
+
+  /**
+   * Забыть цены перечисленных символов. Зовётся при смене маршрутизации
+   * (ADR-031): цена, полученная от источника, который больше не ведёт
+   * символ, — это цена от постороннего. Оставить её до порога протухания
+   * значило бы ещё `staleAfterMs` отдавать её как текущую, причём сразу
+   * после того, как оператор этот источник выключил.
+   *
+   * Возвращает, сколько записей реально убрано: без этого числа «нечего было
+   * убирать» неотличимо от «убрали».
+   */
+  invalidate(symbols: Iterable<string>): number {
+    let removed = 0;
+    for (const symbol of symbols) {
+      if (this.last.delete(symbol)) removed += 1;
+      for (const state of this.clients.values()) state.dirty.delete(symbol);
+    }
+    return removed;
+  }
+
+  /** Есть ли вообще цена по символу (любой свежести). Для диагностики. */
+  has(symbol: string): boolean {
+    return this.last.has(symbol);
   }
 
   /** Возраст каждой котировки в памяти, мс. Для /health. */

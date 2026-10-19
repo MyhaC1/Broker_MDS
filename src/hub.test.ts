@@ -25,6 +25,7 @@ function quote(symbol: string, ageMs: number, price = 100): Quote {
     digits: 2,
     changePercent: 1.5,
     ts: NOW - ageMs,
+    source: 'binance',
   };
 }
 

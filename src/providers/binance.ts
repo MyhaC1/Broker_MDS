@@ -38,11 +38,14 @@ export interface BinanceProviderOptions {
   wsUrl: string;
   /** Таймер тишины, мс: столько без опознанного тика — соединение мёртвое. */
   silenceMs: number;
+  /** id источника из реестра провайдеров: уходит в `Quote.source` (Р-047). */
+  id: string;
 }
 
 export function normalizeTick(
   data: BinanceTicker,
   bySymbol: Map<string, CatalogInstrument>,
+  sourceId: string,
 ): Quote | null {
   const instrument = bySymbol.get(data.s.toLowerCase());
   if (!instrument) return null;
@@ -57,6 +60,7 @@ export function normalizeTick(
     digits: instrument.digits,
     changePercent,
     ts: data.E,
+    source: sourceId,
   };
 }
 
@@ -69,6 +73,9 @@ export class BinanceProvider {
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private readonly wsUrl: string;
   private readonly silenceMs: number;
+  readonly id: string;
+  /** Что уже подписано на текущем сокете: база для дельты при переназначении. */
+  private subscribed = new Set<string>();
   /**
    * Момент последнего **признака жизни соединения**: открытие сокета либо
    * опознанный тик. Отдельно от `lastTickAt`, потому что до первого тика
@@ -86,12 +93,48 @@ export class BinanceProvider {
   ) {
     this.wsUrl = options?.wsUrl ?? config.binanceWsUrl;
     this.silenceMs = options?.silenceMs ?? config.providerSilenceMs;
+    this.id = options?.id ?? 'binance';
   }
 
-  /** Пары вселенной; на них подписываемся при (пере)соединении. */
+  /**
+   * Пары, которые источник обязан транслировать. Зовётся и при старте, и при
+   * каждой смене маршрутизации (Р-047): переключение провайдера обязано
+   * доходить до живого сокета, а не только до таблицы в памяти.
+   *
+   * На открытом сокете шлём **дельту**, а не переподключаемся: переподключение
+   * ради смены набора уронило бы и те символы, которых правка не касалась.
+   */
   setInstruments(instruments: CatalogInstrument[]) {
     this.instruments = instruments;
     this.bySymbol = new Map(instruments.map((i) => [i.providerSymbol, i]));
+    const ws = this.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) this.applyDelta(ws);
+  }
+
+  /** Разница между подписанным и нужным, чанками и с уважением к лимитам. */
+  private applyDelta(ws: WebSocket) {
+    const wanted = new Set(this.instruments.map((i) => i.providerSymbol));
+    const toAdd = [...wanted].filter((s) => !this.subscribed.has(s));
+    const toDrop = [...this.subscribed].filter((s) => !wanted.has(s));
+    if (toAdd.length === 0 && toDrop.length === 0) return;
+    this.send(ws, 'UNSUBSCRIBE', toDrop);
+    this.send(ws, 'SUBSCRIBE', toAdd);
+    this.subscribed = wanted;
+    console.info(
+      `[${this.id}] переназначение: +${toAdd.length} / −${toDrop.length} пар, итого ${wanted.size}`,
+    );
+  }
+
+  private send(ws: WebSocket, method: 'SUBSCRIBE' | 'UNSUBSCRIBE', symbols: string[]) {
+    const streams = symbols.map((s) => `${s}@ticker`);
+    for (let n = 0, id = 1; n < streams.length; n += MAX_STREAMS_PER_MSG, id += 1) {
+      const params = streams.slice(n, n + MAX_STREAMS_PER_MSG);
+      const idx = n / MAX_STREAMS_PER_MSG;
+      const t = setTimeout(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ method, params, id }));
+      }, idx * SUBSCRIBE_STAGGER_MS);
+      t.unref?.();
+    }
   }
 
   /**
@@ -105,19 +148,9 @@ export class BinanceProvider {
         `[binance] ${this.instruments.length} пар > лимит 1024/соединение — нужен шардинг по сокетам`,
       );
     }
-    const streams = this.instruments.map((i) => `${i.providerSymbol}@ticker`);
-    const chunks: string[][] = [];
-    for (let n = 0; n < streams.length; n += MAX_STREAMS_PER_MSG) {
-      chunks.push(streams.slice(n, n + MAX_STREAMS_PER_MSG));
-    }
-    chunks.forEach((params, idx) => {
-      const t = setTimeout(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ method: 'SUBSCRIBE', params, id: idx + 1 }));
-        }
-      }, idx * SUBSCRIBE_STAGGER_MS);
-      t.unref?.();
-    });
+    const symbols = this.instruments.map((i) => i.providerSymbol);
+    this.send(ws, 'SUBSCRIBE', symbols);
+    this.subscribed = new Set(symbols);
   }
 
   private stopWatchdog() {
@@ -172,7 +205,7 @@ export class BinanceProvider {
         // Кадр — либо ack подписки ({result,id}), либо тикер 24hrTicker
         const ticker = JSON.parse(String(raw)) as BinanceTicker;
         if (ticker.e !== '24hrTicker') return;
-        const quote = normalizeTick(ticker, this.bySymbol);
+        const quote = normalizeTick(ticker, this.bySymbol, this.id);
         if (quote) {
           // Живость отмечается на ПРИНЯТОМ И ОПОЗНАННОМ сообщении, а не на
           // любом кадре: иначе ack подписки или мусор продлевали бы жизнь
@@ -189,6 +222,9 @@ export class BinanceProvider {
     const scheduleRetry = () => {
       // Обработчик устаревшего сокета не должен плодить лишние реконнекты.
       if (this.ws !== ws) return;
+      // Подписки живут на сокете: уцелевший список после разрыва заставил бы
+      // дельту решить, что подписываться не на что.
+      this.subscribed.clear();
       this.stopWatchdog();
       if (this.closedByUs) return;
       this.status = 'reconnecting';
@@ -209,6 +245,7 @@ export class BinanceProvider {
   /** Остановка провайдера (тесты, штатное завершение). */
   stop() {
     this.closedByUs = true;
+    this.subscribed.clear();
     this.stopWatchdog();
     this.ws?.terminate();
     this.ws = null;
