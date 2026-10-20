@@ -128,33 +128,33 @@ describe('реестр · два провайдера на один символ
     });
     const route = table.routes.get('XAUUSD')!;
     expect(route.reason).toBe('silent');
-    // Не `no_source` и не `source_disabled`: источник есть и включён, он молчит.
+    // Не `no-source` и не `source-disabled`: источник есть и включён, он молчит.
     expect(route.leader).not.toBeNull();
   });
 });
 
 describe('реестр · отключённый источник и пустой реестр — разные состояния', () => {
-  it('источник выключен → source_disabled, символ остаётся в таблице', () => {
+  it('источник выключен → source-disabled, символ остаётся в таблице', () => {
     const reg = registry();
     reg.providers = reg.providers.map((p) => ({ ...p, enabled: p.id === 'binance' }));
     const table = resolveRouting(CATALOG, reg, quiet);
     const route = table.routes.get('XAUUSD')!;
-    expect(route.reason).toBe('source_disabled');
+    expect(route.reason).toBe('source-disabled');
     expect(route.leader).toBeNull();
     // Символ не исчез: «инструмента нет» и «источник выключен» — разное.
     expect(table.routes.has('XAUUSD')).toBe(true);
   });
 
-  it('пустой реестр → каждый символ no_source, а не пустая таблица', () => {
+  it('пустой реестр → каждый символ no-source, а не пустая таблица', () => {
     const table = resolveRouting(CATALOG, registry({ providers: [] }), quiet);
     expect(table.routes.size).toBe(4);
-    expect([...table.routes.values()].every((r) => r.reason === 'no_source')).toBe(true);
+    expect([...table.routes.values()].every((r) => r.reason === 'no-source')).toBe(true);
     expect(summarizeRouting(table).routed).toBe(0);
   });
 
-  it('категория не покрыта ни одним источником → no_source, а не тихое исчезновение', () => {
+  it('категория не покрыта ни одним источником → no-source, а не тихое исчезновение', () => {
     const table = resolveRouting(CATALOG, registry(), quiet);
-    expect(table.routes.get('BRENT')?.reason).toBe('no_source');
+    expect(table.routes.get('BRENT')?.reason).toBe('no-source');
   });
 
   it('охват объявлен числом и у числа названа единица', () => {

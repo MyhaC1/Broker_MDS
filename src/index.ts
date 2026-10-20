@@ -33,7 +33,7 @@ import type { ProviderEntry } from './registry.js';
  */
 
 let cryptoUniverse = await fetchBinanceSpotUniverse(config.binanceApiUrl);
-let catalogSource = 'binance-exchangeInfo';
+let catalogSource = 'binance-exchange-info';
 if (!cryptoUniverse) {
   cryptoUniverse = CATALOG.filter((i) => i.provider === 'binance');
   catalogSource = 'static-fallback';

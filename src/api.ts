@@ -178,21 +178,24 @@ export function buildHealth(input: HealthInput): { httpStatus: 200 | 503; body: 
  * «такого инструмента у нас нет» и «цена протухла» были неразличимы, и
  * потребитель мог прочитать любой из них как «пока не приехало».
  */
-export type UnavailableReason =
+export const UNAVAILABLE_REASONS = [
   /** Порог свежести не задан — судить о свежести нечем, не отдаём ничего. */
-  | 'threshold_unset'
+  'threshold-unset',
   /** Цена есть, но старше порога. */
-  | 'stale'
+  'stale',
   /** Источник назначен и включён, но цены от него нет (ещё или уже). */
-  | 'source_silent'
+  'source-silent',
   /** Источники для символа есть, но все выключены в реестре. */
-  | 'source_disabled'
+  'source-disabled',
   /** Ни один источник реестра не ведёт этот символ. */
-  | 'no_source'
+  'no-source',
   /** Символа нет во вселенной MDS вообще. */
-  | 'not_in_catalog'
+  'not-in-catalog',
   /** Реестр не прочитан — маршрутизации нет, работать нечем. */
-  | 'registry_unreadable';
+  'registry-unreadable',
+] as const;
+
+export type UnavailableReason = (typeof UNAVAILABLE_REASONS)[number];
 
 /** Что маршрутизация знает о символах. `readable: false` — реестра нет вовсе. */
 export interface QuotesRouting {
@@ -214,18 +217,18 @@ export interface QuotesBody extends SnapshotResult {
 
 function routeToUnavailable(reason: RouteReason | undefined): UnavailableReason {
   switch (reason) {
-    case 'no_source':
-      return 'no_source';
-    case 'source_disabled':
-      return 'source_disabled';
+    case 'no-source':
+      return 'no-source';
+    case 'source-disabled':
+      return 'source-disabled';
     case 'primary':
     case 'failover':
     case 'silent':
       // Маршрут есть, цены нет: источник назначен, но молчит — это не то же
       // самое, что «источника нет», и чинится другим.
-      return 'source_silent';
+      return 'source-silent';
     default:
-      return 'not_in_catalog';
+      return 'not-in-catalog';
   }
 }
 
@@ -252,7 +255,7 @@ export function buildQuotes(
     // Реестр не прочитан: причина у всех одна, и она блокирующая. Подменять
     // её на «источник молчит» значило бы отправить чинить не то.
     for (const symbol of requested ?? [...routing.reasons.keys()]) {
-      unavailable.push({ symbol, reason: 'registry_unreadable' });
+      unavailable.push({ symbol, reason: 'registry-unreadable' });
     }
     return {
       items: [],
@@ -269,7 +272,7 @@ export function buildQuotes(
   for (const symbol of universe) {
     if (fresh.has(symbol)) continue;
     if (staleAfterMs === null) {
-      unavailable.push({ symbol, reason: 'threshold_unset' });
+      unavailable.push({ symbol, reason: 'threshold-unset' });
       continue;
     }
     // Цена в памяти есть, но не прошла порог — это `stale`, и перепутать её

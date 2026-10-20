@@ -168,17 +168,20 @@ export function builtinRegistry(): Registry {
  * **не переводятся**: подпись для человека и признак для машины — разные
  * поля, перевод в признаке мы уже ловили.
  */
-export type RouteReason =
+export const ROUTE_REASONS = [
   /** Ведёт источник с лучшим приоритетом, он жив. */
-  | 'primary'
+  'primary',
   /** Основной молчит дольше своего `maxSilenceMs`, ведёт запасной. */
-  | 'failover'
+  'failover',
   /** Кандидат один (или все остальные молчат) и он сам молчит. Цены нет. */
-  | 'silent'
+  'silent',
   /** Источники для символа есть, но все выключены в реестре. */
-  | 'source_disabled'
+  'source-disabled',
   /** Ни один источник реестра не ведёт этот символ. */
-  | 'no_source';
+  'no-source',
+] as const;
+
+export type RouteReason = (typeof ROUTE_REASONS)[number];
 
 export interface RouteCandidate {
   providerId: string;
@@ -294,7 +297,7 @@ export function resolveRouting(
         symbol,
         category,
         leader: null,
-        reason: 'no_source',
+        reason: 'no-source',
         candidates,
         hiddenByCollision,
       });
@@ -307,7 +310,7 @@ export function resolveRouting(
         symbol,
         category,
         leader: null,
-        reason: 'source_disabled',
+        reason: 'source-disabled',
         candidates,
         hiddenByCollision,
       });
@@ -379,8 +382,8 @@ export function summarizeRouting(table: RoutingTable): RoutingSummary {
     primary: 0,
     failover: 0,
     silent: 0,
-    source_disabled: 0,
-    no_source: 0,
+    'source-disabled': 0,
+    'no-source': 0,
   };
   let routed = 0;
   let hidden = 0;
