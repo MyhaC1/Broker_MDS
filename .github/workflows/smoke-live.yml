@@ -35,7 +35,14 @@ permissions:
 
 jobs:
   live:
-    runs-on: ubuntu-latest
+    # Образ закреплён, а не `ubuntu-latest`. GitHub прислал в аннотации
+    # прогона 20.10: «The ubuntu-latest label will migrate to Ubuntu 26
+    # beginning October 19, 2026». Мы ровно в окне переезда — два
+    # соседних пуша могли бы ехать на разных образах, и красное от смены
+    # образа неотличимо от красного по делу. Возвращаться к `latest`:
+    # когда переезд закончится (следить за actions/runner-images#14748).
+    # Цена промедления: отстающий образ, то есть мелочь.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
