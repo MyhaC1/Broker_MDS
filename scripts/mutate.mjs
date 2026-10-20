@@ -9,11 +9,56 @@
  *
  * Запуск: node scripts/mutate.mjs [подстрока-имени-мутации]
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 
-const UNIT = ['src/registry.test.ts', 'src/api.test.ts', 'src/catalog.test.ts', 'src/hub.test.ts'];
-const INTEGRATION = ['src/server.test.ts', 'src/providers/binance.test.ts', 'src/providers/twelvedata.test.ts'];
+const UNIT = [
+  'src/registry.test.ts',
+  'src/api.test.ts',
+  'src/catalog.test.ts',
+  'src/hub.test.ts',
+  'src/reason-codes.test.ts',
+];
+const INTEGRATION = [
+  'src/server.test.ts',
+  'src/providers/binance.test.ts',
+  'src/providers/twelvedata.test.ts',
+];
+
+/**
+ * Перечень, который ведут руками, отстаёт молча: новый файл проверок не
+ * попал бы ни в один набор, мутации гонялись бы без него, и узнать об этом
+ * было бы неоткуда — ровно так одиннадцать свежих проверок терминала не
+ * запускались бы в CI. Поэтому состав наборов СВЕРЯЕТСЯ С ДИСКОМ, и
+ * расхождение здесь — отказ с кодом возврата, а не строчка предупреждения.
+ *
+ * Общий прогон (`pnpm test`) эту проблему не имеет: он зовёт команду
+ * проекта, а она берёт все `*.test.ts`. Раскол на два набора нужен только
+ * здесь, потому что вывод «мутация не покрасила» без указания набора
+ * недействителен.
+ */
+function assertSetsCoverDisk() {
+  const onDisk = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.test.ts')) onDisk.push(full);
+    }
+  };
+  walk('src');
+  const classified = new Set([...UNIT, ...INTEGRATION]);
+  const unclassified = onDisk.filter((f) => !classified.has(f));
+  const vanished = [...classified].filter((f) => !onDisk.includes(f));
+  if (unclassified.length > 0 || vanished.length > 0) {
+    console.error('ОТКАЗ: наборы мутационного прогона разошлись с диском.');
+    for (const f of unclassified) console.error(`  не отнесён ни к одному набору: ${f}`);
+    for (const f of vanished) console.error(`  числится в наборе, но файла нет: ${f}`);
+    console.error('Пока это не исправлено, результат прогона неизвестен, а не зелёный.');
+    process.exit(2);
+  }
+  console.log(`Наборы сверены с диском: файлов проверок ${onDisk.length}, все отнесены.`);
+}
 
 /** @type {{name: string, file: string, from: string, to: string, expect: string}[]} */
 const MUTATIONS = [
@@ -97,28 +142,61 @@ const MUTATIONS = [
   {
     name: 'причины: «нет источника» подменяется «источник молчит»',
     file: 'src/api.ts',
-    from: "    case 'no_source':\n      return 'no_source';",
-    to: "    case 'no_source':\n      return 'source_silent';",
+    from: "    case 'no-source':\n      return 'no-source';",
+    to: "    case 'no-source':\n      return 'source-silent';",
     expect: 'модульный: состояния снова неразличимы',
+  },
+  {
+    name: 'словарь: имя причины вернулось к подчёркиванию (Р-087)',
+    file: 'src/api.ts',
+    from: "  'not-in-catalog',",
+    to: "  'not_in_catalog',",
+    expect: 'модульный: стиль и состав оси символа расходятся с §4г',
+  },
+  {
+    name: 'словарь: восьмая причина заведена в коде мимо §4г',
+    file: 'src/api.ts',
+    from: "  'registry-unreadable',\n] as const;",
+    to: "  'registry-unreadable',\n  'source-unhappy',\n] as const;",
+    expect: 'модульный: состав оси символа разошёлся с контрактом',
   },
 ];
 
+/**
+ * Прогон набора под мутацией.
+ *
+ * Возвращает не только число красных, но и ИМЕНА красных проверок: красный
+ * без указания, какая опора покраснела, значит не больше зелёного. У зоны
+ * `deploy` три мутации покраснели не по той причине — сторож переводов
+ * строки срабатывал первым и обрывал прогон до самой проверки.
+ *
+ * Исходов ТРИ, а не два: зелено · покраснело · РЕЗУЛЬТАТ НЕИЗВЕСТЕН (прогон
+ * упал не от проверок — ошибка типов в мутации, зависший процесс). Третий
+ * исход не красный и не зелёный, и схлопывать его нельзя ни с тем, ни с
+ * другим: «не сошлось» и «не смотрели» — разные вещи.
+ */
 function runSuite(files) {
   try {
     execSync(`npx vitest run ${files.join(' ')} --reporter=basic`, { stdio: 'pipe', encoding: 'utf8' });
-    return 0;
+    return { kind: 'green', failed: 0, names: [] };
   } catch (error) {
     const raw = `${error.stdout ?? ''}${error.stderr ?? ''}`;
     // Цветовые коды терминала стоят между «Tests» и числом: без очистки
     // разбор молча не находит ничего и выдаёт «не покрасила».
-    const out = raw.replace(/\[[0-9;]*m/g, '');
+    const out = raw.replace(/\u001b\[[0-9;]*m/g, '');
     const match = out.match(/Tests\s+(\d+) failed/);
-    if (match) return Number(match[1]);
-    // Падение не от проверок (например, ошибка типов в мутации) — это не
-    // «покраснело», и выдавать его за красный нельзя.
-    return -1;
+    if (!match) {
+      const why = out.split('\n').map((l) => l.trim()).filter(Boolean).slice(-3).join(' | ');
+      return { kind: 'unknown', failed: 0, names: [], why };
+    }
+    const names = [...out.matchAll(/^\s*(?:×|FAIL)\s+(.+?)\s*$/gm)].map((m) => m[1]).slice(0, 8);
+    return { kind: 'red', failed: Number(match[1]), names };
   }
 }
+
+const show = (r) => (r.kind === 'unknown' ? 'РЕЗУЛЬТАТ НЕИЗВЕСТЕН' : String(r.failed));
+
+assertSetsCoverDisk();
 
 const filter = process.argv[2];
 const picked = filter ? MUTATIONS.filter((m) => m.name.includes(filter)) : MUTATIONS;
@@ -135,17 +213,29 @@ for (const mutation of picked) {
   mutation.from = mutation.from.split(LF).join(eol);
   mutation.to = mutation.to.split(LF).join(eol);
   if (!original.includes(mutation.from)) {
-    console.error(`ПРОПУЩЕНА (якорь не найден): ${mutation.name}`);
-    results.push({ name: mutation.name, unit: 'якорь не найден', integration: '—' });
-    continue;
+    // Харнесс, не нашедший якорь, ОБЯЗАН ПАДАТЬ. Дважды подряд печаталось
+    // уверенное «0 красных», хотя подстановка не применилась: «ноль
+    // красных» читается как результат («тесты слабые») и ведёт чинить то,
+    // что не сломано. Продолжать прогон после непроставленной мутации
+    // нельзя — остальные строки таблицы будут выглядеть такими же.
+    console.error(`ОТКАЗ: якорь мутации не найден в ${mutation.file}: ${mutation.name}`);
+    console.error('Результат всего прогона неизвестен, а не зелёный.');
+    process.exit(2);
   }
   writeFileSync(mutation.file, original.replace(mutation.from, mutation.to), 'utf8');
   try {
     const unit = runSuite(UNIT);
     const integration = runSuite(INTEGRATION);
-    results.push({ name: mutation.name, unit, integration, expect: mutation.expect });
-    console.log(`${unit === 0 && integration === 0 ? 'НЕ ПОКРАСИЛА' : 'ok'}  ${mutation.name}`);
-    console.log(`        модульных: ${unit} · интеграционных: ${integration}`);
+    const unknown = unit.kind === 'unknown' || integration.kind === 'unknown';
+    const dead = !unknown && unit.failed === 0 && integration.failed === 0;
+    results.push({ name: mutation.name, unit, integration, unknown, dead, expect: mutation.expect });
+    console.log(`${unknown ? 'НЕИЗВЕСТНО  ' : dead ? 'НЕ ПОКРАСИЛА' : 'ok          '}  ${mutation.name}`);
+    console.log(`        модульных: ${show(unit)} · интеграционных: ${show(integration)}`);
+    // Какая именно опора покраснела: красное без этого ничем не отличается
+    // от красного по соседней причине.
+    for (const n of [...unit.names, ...integration.names]) console.log(`        красный: ${n}`);
+    if (unit.why) console.log(`        модульный упал не от проверок: ${unit.why}`);
+    if (integration.why) console.log(`        интеграционный упал не от проверок: ${integration.why}`);
   } finally {
     writeFileSync(mutation.file, original, 'utf8');
   }
@@ -153,9 +243,24 @@ for (const mutation of picked) {
 
 console.log('\n| мутация | модульных красных | интеграционных красных |');
 console.log('| --- | --- | --- |');
-for (const r of results) console.log(`| ${r.name} | ${r.unit} | ${r.integration} |`);
-const dead = results.filter((r) => r.unit === 0 && r.integration === 0);
+for (const r of results) console.log(`| ${r.name} | ${show(r.unit)} | ${show(r.integration)} |`);
+
+// Невыполненные прогоны — первой строкой резюме и ДО чисел: резюме читают
+// вместо отчёта.
+const unknowns = results.filter((r) => r.unknown);
+if (unknowns.length > 0) {
+  console.log(`\nРЕЗУЛЬТАТ НЕИЗВЕСТЕН (${unknowns.length}) — прогон упал не от проверок:`);
+  for (const r of unknowns) console.log(` - ${r.name}`);
+}
+const dead = results.filter((r) => r.dead);
 if (dead.length > 0) {
   console.log(`\nНЕ ПОКРАСИЛИ НИ ОДНОГО ТЕСТА (${dead.length}):`);
   for (const r of dead) console.log(` - ${r.name}`);
 }
+console.log(
+  `\nОхват: мутаций ${results.length} · покрасили ${results.length - dead.length - unknowns.length}` +
+    ` · не покрасили ${dead.length} · результат неизвестен ${unknowns.length}`,
+);
+// У каждого исхода свой код возврата: «не сошлось» и «результат неизвестен»
+// одним числом — ложь кодом возврата.
+process.exit(dead.length > 0 ? 1 : unknowns.length > 0 ? 2 : 0);

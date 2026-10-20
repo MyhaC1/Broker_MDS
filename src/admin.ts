@@ -35,8 +35,38 @@ export type AuthOutcome =
    * Код отличается от `unauthorized` намеренно — «ручка выключена» и «вас не
    * пустили» разные диагнозы, и путать их значит отправлять чинить не то.
    */
-  | { ok: false; code: 'control_plane_disabled'; status: 503; detail: string }
-  | { ok: false; code: 'unauthorized'; status: 401; detail: 'no_token' | 'bad_token' };
+  | { ok: false; code: Extract<AdminCode, 'control-plane-disabled'>; status: 503; detail: string }
+  | { ok: false; code: Extract<AdminCode, 'unauthorized'>; status: 401; detail: UnauthorizedDetail };
+
+/**
+ * Все машинные коды отказа служебной ручки, перечнем, который видно в
+ * рантайме. Перечисление в типе компилятор стирает — проверить стиль или
+ * сверить с контрактом по нему нельзя, а перечень руками рядом с типом
+ * отстаёт молча (так уже отставал перечень полей в комплаенсе CMS).
+ *
+ * Стиль — kebab-case, один на платформу (Р-087, `_brain/КОНТРАКТЫ.md` §4г).
+ * Это **третья** ось, в §4г не названная: ось символа говорит, почему нет
+ * цены, ось канала — почему потребитель не получил ответа, а эта — почему
+ * MDS отказал в запросе к служебной ручке.
+ */
+export const ADMIN_CODES = [
+  'control-plane-disabled',
+  'unauthorized',
+  'registry-unreadable',
+  'bad-body',
+  'version-required',
+  'version-conflict',
+  'invalid-registry',
+  'method-not-allowed',
+  'not-found',
+] as const;
+
+export type AdminCode = (typeof ADMIN_CODES)[number];
+
+/** Уточнение к `unauthorized`: заголовка не было или он не тот. */
+export const UNAUTHORIZED_DETAILS = ['no-token', 'bad-token'] as const;
+
+export type UnauthorizedDetail = (typeof UNAUTHORIZED_DETAILS)[number];
 
 /** Короткий секрет создаёт видимость защиты, поэтому он не секрет, а ошибка настройки. */
 export const MIN_ADMIN_TOKEN_LENGTH = 24;
@@ -45,7 +75,7 @@ export function authorize(header: string | string[] | undefined, configured: str
   if (configured === undefined || configured.trim() === '') {
     return {
       ok: false,
-      code: 'control_plane_disabled',
+      code: 'control-plane-disabled',
       status: 503,
       detail: 'MDS_ADMIN_TOKEN не задан — служебная ручка выключена',
     };
@@ -57,7 +87,7 @@ export function authorize(header: string | string[] | undefined, configured: str
   if (!/^[!-~]+$/.test(configured)) {
     return {
       ok: false,
-      code: 'control_plane_disabled',
+      code: 'control-plane-disabled',
       status: 503,
       detail: 'MDS_ADMIN_TOKEN содержит символы, непередаваемые в HTTP-заголовке (нужен ASCII без пробелов)',
     };
@@ -65,14 +95,14 @@ export function authorize(header: string | string[] | undefined, configured: str
   if (configured.length < MIN_ADMIN_TOKEN_LENGTH) {
     return {
       ok: false,
-      code: 'control_plane_disabled',
+      code: 'control-plane-disabled',
       status: 503,
       detail: `MDS_ADMIN_TOKEN короче ${MIN_ADMIN_TOKEN_LENGTH} символов — считаем настройку непригодной`,
     };
   }
   const supplied = Array.isArray(header) ? header[0] : header;
   if (supplied === undefined || supplied === '') {
-    return { ok: false, code: 'unauthorized', status: 401, detail: 'no_token' };
+    return { ok: false, code: 'unauthorized', status: 401, detail: 'no-token' };
   }
   const a = Buffer.from(supplied, 'utf8');
   const b = Buffer.from(configured, 'utf8');
@@ -80,7 +110,7 @@ export function authorize(header: string | string[] | undefined, configured: str
   // разной длины), поэтому сравниваем её отдельно и явно, а содержимое — за
   // постоянное время.
   const equal = a.length === b.length && timingSafeEqual(a, b);
-  return equal ? { ok: true } : { ok: false, code: 'unauthorized', status: 401, detail: 'bad_token' };
+  return equal ? { ok: true } : { ok: false, code: 'unauthorized', status: 401, detail: 'bad-token' };
 }
 
 export interface AdminView {
@@ -120,7 +150,7 @@ export function buildAdminView(input: {
 
 export type UpdateOutcome =
   | { ok: true; registry: Registry }
-  | { ok: false; status: 400 | 409 | 503; code: string; detail: string };
+  | { ok: false; status: 400 | 409 | 503; code: AdminCode; detail: string };
 
 /**
  * Приём изменения реестра. Чистая функция: вход — текущее состояние и тело
@@ -140,19 +170,19 @@ export function applyRegistryUpdate(
     return {
       ok: false,
       status: 503,
-      code: 'registry_unreadable',
+      code: 'registry-unreadable',
       detail: 'действующий реестр не прочитан — чинить файл, а не писать поверх вслепую',
     };
   }
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-    return { ok: false, status: 400, code: 'bad_body', detail: 'тело запроса — объект JSON' };
+    return { ok: false, status: 400, code: 'bad-body', detail: 'тело запроса — объект JSON' };
   }
   const incoming = body as Record<string, unknown>;
   if (typeof incoming.version !== 'number' || !Number.isInteger(incoming.version)) {
     return {
       ok: false,
       status: 400,
-      code: 'version_required',
+      code: 'version-required',
       detail: 'version обязателен: без него правка затирает чужую молча',
     };
   }
@@ -160,7 +190,7 @@ export function applyRegistryUpdate(
     return {
       ok: false,
       status: 409,
-      code: 'version_conflict',
+      code: 'version-conflict',
       detail: `реестр уже версии ${current.version}, прислана правка от ${incoming.version}`,
     };
   }
@@ -178,7 +208,7 @@ export function applyRegistryUpdate(
       .slice(0, 8)
       .map((i) => `${i.path.join('.') || '(корень)'}: ${i.message}`)
       .join('; ');
-    return { ok: false, status: 400, code: 'invalid_registry', detail: issues };
+    return { ok: false, status: 400, code: 'invalid-registry', detail: issues };
   }
 
   return { ok: true, registry: parsed.data };

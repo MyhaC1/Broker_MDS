@@ -22,7 +22,7 @@ function health(over: Partial<HealthInput> = {}) {
     ]),
     primaryProvider: 'binance',
     staleAfterMs: 10_000,
-    catalog: { source: 'binance-exchangeInfo', instruments: 484 },
+    catalog: { source: 'binance-exchange-info', instruments: 484 },
     registry: {
       origin: 'file',
       version: 3,
@@ -216,22 +216,22 @@ describe('/v1/quotes · почему символа нет — разные от
     return body.unavailable.find((u) => u.symbol === requested)?.reason;
   }
 
-  it('источник выключен оператором → source_disabled, а не «нет данных»', () => {
-    expect(reasonFor('source_disabled')).toBe('source_disabled');
+  it('источник выключен оператором → source-disabled, а не «нет данных»', () => {
+    expect(reasonFor('source-disabled')).toBe('source-disabled');
   });
 
-  it('источника для символа нет в реестре → no_source', () => {
-    expect(reasonFor('no_source')).toBe('no_source');
+  it('источника для символа нет в реестре → no-source', () => {
+    expect(reasonFor('no-source')).toBe('no-source');
   });
 
-  it('источник назначен, но цены ещё нет → source_silent', () => {
-    expect(reasonFor('primary')).toBe('source_silent');
-    expect(reasonFor('failover')).toBe('source_silent');
-    expect(reasonFor('silent')).toBe('source_silent');
+  it('источник назначен, но цены ещё нет → source-silent', () => {
+    expect(reasonFor('primary')).toBe('source-silent');
+    expect(reasonFor('failover')).toBe('source-silent');
+    expect(reasonFor('silent')).toBe('source-silent');
   });
 
-  it('символа нет во вселенной вовсе → not_in_catalog, а не «источник молчит»', () => {
-    expect(reasonFor(null)).toBe('not_in_catalog');
+  it('символа нет во вселенной вовсе → not-in-catalog, а не «источник молчит»', () => {
+    expect(reasonFor(null)).toBe('not-in-catalog');
   });
 
   it('цена есть, но старая → stale, и она не смешивается с «источник молчит»', () => {
@@ -244,17 +244,17 @@ describe('/v1/quotes · почему символа нет — разные от
     expect(body.unavailable).toEqual([{ symbol: 'ETHUSD', reason: 'stale' }]);
   });
 
-  it('порога нет → threshold_unset у каждого спрошенного, а не молчание', () => {
+  it('порога нет → threshold-unset у каждого спрошенного, а не молчание', () => {
     const body = buildQuotes(
       { items: [], staleSymbols: null, checked: 0, missing: ['BTCUSD'] },
       null,
       { readable: true, reasons: new Map<string, RouteReason>([['BTCUSD', 'primary']]) },
       ['BTCUSD'],
     );
-    expect(body.unavailable).toEqual([{ symbol: 'BTCUSD', reason: 'threshold_unset' }]);
+    expect(body.unavailable).toEqual([{ symbol: 'BTCUSD', reason: 'threshold-unset' }]);
   });
 
-  it('реестр не прочитан → registry_unreadable у всех, а не пустой ответ', () => {
+  it('реестр не прочитан → registry-unreadable у всех, а не пустой ответ', () => {
     const body = buildQuotes(
       { items: [], staleSymbols: null, checked: 0, missing: ['BTCUSD'] },
       10_000,
@@ -262,8 +262,8 @@ describe('/v1/quotes · почему символа нет — разные от
       ['BTCUSD', 'ETHUSD'],
     );
     expect(body.unavailable).toEqual([
-      { symbol: 'BTCUSD', reason: 'registry_unreadable' },
-      { symbol: 'ETHUSD', reason: 'registry_unreadable' },
+      { symbol: 'BTCUSD', reason: 'registry-unreadable' },
+      { symbol: 'ETHUSD', reason: 'registry-unreadable' },
     ]);
     expect(body.reason).toContain('реестр');
   });
@@ -276,14 +276,14 @@ describe('/v1/quotes · почему символа нет — разные от
         readable: true,
         reasons: new Map<string, RouteReason>([
           ['BTCUSD', 'primary'],
-          ['XAUUSD', 'source_disabled'],
+          ['XAUUSD', 'source-disabled'],
         ]),
       },
       null,
     );
     expect(body.unavailable).toEqual([
-      { symbol: 'BTCUSD', reason: 'source_silent' },
-      { symbol: 'XAUUSD', reason: 'source_disabled' },
+      { symbol: 'BTCUSD', reason: 'source-silent' },
+      { symbol: 'XAUUSD', reason: 'source-disabled' },
     ]);
   });
 });

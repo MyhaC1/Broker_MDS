@@ -108,7 +108,7 @@ async function boot(options: {
 
   const server = createMdsServer({
     catalog: CATALOG,
-    catalogSource: options.catalogSource ?? 'binance-exchangeInfo',
+    catalogSource: options.catalogSource ?? 'binance-exchange-info',
     loaded:
       origin === 'error'
         ? { origin: 'error', registry: null, error: options.error ?? 'JSON: сломан', path }
@@ -192,7 +192,7 @@ describe('служебная ручка · кто имеет право её з�
     const h = await boot({ adminToken: undefined });
     const res = await admin(h, { token: null });
     expect(res.status).toBe(503);
-    expect((await asJson(res)).error).toBe('control_plane_disabled');
+    expect((await asJson(res)).error).toBe('control-plane-disabled');
   });
 
   it('секрет короткий → тоже 503: видимость защиты защитой не считается', async () => {
@@ -216,11 +216,11 @@ describe('служебная ручка · кто имеет право её з�
     expect((await admin(on, { token: null })).status).toBe(401);
   });
 
-  it('нет заголовка → 401 no_token, чужой секрет → 401 bad_token', async () => {
+  it('нет заголовка → 401 no-token, чужой секрет → 401 bad-token', async () => {
     const h = await boot({});
-    expect((await asJson(await admin(h, { token: null }))).detail).toBe('no_token');
+    expect((await asJson(await admin(h, { token: null }))).detail).toBe('no-token');
     expect((await asJson(await admin(h, { token: 'ne-tot-sekret-dlinoyu-podlinnee' }))).detail).toBe(
-      'bad_token',
+      'bad-token',
     );
   });
 
@@ -260,7 +260,7 @@ describe('служебная ручка · приём изменения', () =>
     const h = await boot({});
     const res = await put(h, { ...twoSourceRegistry(), version: 99 });
     expect(res.status).toBe(409);
-    expect((await asJson(res)).error).toBe('version_conflict');
+    expect((await asJson(res)).error).toBe('version-conflict');
     expect(h.server.registry()?.version).toBe(0);
   });
 
@@ -274,7 +274,7 @@ describe('служебная ручка · приём изменения', () =>
     const h = await boot({});
     const res = await put(h, { ...twoSourceRegistry(), опечатка: true });
     expect(res.status).toBe(400);
-    expect((await asJson(res)).error).toBe('invalid_registry');
+    expect((await asJson(res)).error).toBe('invalid-registry');
   });
 
   it('принятая правка поднимает версию и ложится на диск', async () => {
@@ -304,14 +304,14 @@ describe('служебная ручка · приём изменения', () =>
     expect(entries[0]?.outcome).toBe('applied');
     expect(entries[0]?.actor).toBe('админка CMS');
     expect(entries[0]?.changes.join(' ')).toContain('binance: enabled true → false');
-    expect(entries[1]?.outcome).toBe('rejected:version_conflict');
+    expect(entries[1]?.outcome).toBe('rejected:version-conflict');
   });
 
   it('реестр не прочитан → правку не принимаем вслепую (503), а не пишем поверх', async () => {
     const h = await boot({ origin: 'error' });
     const res = await put(h, twoSourceRegistry());
     expect(res.status).toBe(503);
-    expect((await asJson(res)).error).toBe('registry_unreadable');
+    expect((await asJson(res)).error).toBe('registry-unreadable');
   });
 });
 
@@ -334,7 +334,7 @@ describe('переключение провайдера · что происхо
     const after = await asJson(await fetch(`${h.base}/v1/quotes?symbols=BTCUSD`));
     expect(after.items).toEqual([]);
     // И отказ назван, а не выглядит как «пока не приехало».
-    expect(after.unavailable).toEqual([{ symbol: 'BTCUSD', reason: 'source_disabled' }]);
+    expect(after.unavailable).toEqual([{ symbol: 'BTCUSD', reason: 'source-disabled' }]);
   });
 
   it('смена ведущего источника стирает цену прежнего, а не продолжает ею ряд', async () => {
@@ -352,7 +352,7 @@ describe('переключение провайдера · что происхо
 
     const after = await asJson(await fetch(`${h.base}/v1/quotes?symbols=XAUUSD`));
     expect(after.items).toEqual([]);
-    expect(after.unavailable).toEqual([{ symbol: 'XAUUSD', reason: 'source_silent' }]);
+    expect(after.unavailable).toEqual([{ symbol: 'XAUUSD', reason: 'source-silent' }]);
     // И трансляция переехала на нового ведущего, а не осталась на бумаге.
     expect(h.assigned('metals-alt')).toEqual(['XAUUSD']);
     expect(h.assigned('twelvedata')).toEqual([]);
@@ -423,10 +423,10 @@ describe('состояния, которые нельзя путать, видн
     expect(instruments.status).toBe(503);
     const body = await asJson(instruments);
     expect(body.items).toEqual([]);
-    expect(body.error).toBe('registry_unreadable');
+    expect(body.error).toBe('registry-unreadable');
 
     const quotes = await asJson(await fetch(`${h.base}/v1/quotes?symbols=BTCUSD`));
-    expect(quotes.unavailable).toEqual([{ symbol: 'BTCUSD', reason: 'registry_unreadable' }]);
+    expect(quotes.unavailable).toEqual([{ symbol: 'BTCUSD', reason: 'registry-unreadable' }]);
   });
 
   it('реестр не прочитан → источники не запущены вовсе', async () => {

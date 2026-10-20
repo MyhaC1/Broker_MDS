@@ -24,6 +24,7 @@ import {
   authorize,
   buildAdminView,
   describeChanges,
+  type AdminCode,
 } from './admin.js';
 import type { CatalogInstrument, Quote } from './types.js';
 
@@ -42,7 +43,7 @@ import type { CatalogInstrument, Quote } from './types.js';
 export interface MdsServerDeps {
   /** Вселенная инструментов: что адаптеры умеют стримить. */
   catalog: CatalogInstrument[];
-  /** Откуда каталог: `binance-exchangeInfo` или `static-fallback`. Уходит наружу. */
+  /** Откуда каталог: `binance-exchange-info` или `static-fallback`. Уходит наружу. */
   catalogSource: string;
   loaded: LoadedRegistry;
   staleAfterMs: number | null;
@@ -350,6 +351,21 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
     res.end(JSON.stringify(body));
   }
 
+  /**
+   * Тело отказа. Код берётся из `ADMIN_CODES` — перечня, который видно в
+   * рантайме, а не из строки на месте: перечень, который ведут руками рядом
+   * с кодом, отстаёт молча, и стиль в нём расходится незаметно (Р-087).
+   */
+  function jsonError(
+    res: ServerResponse,
+    status: number,
+    code: AdminCode,
+    detail?: string,
+    noStore = false,
+  ): void {
+    json(res, status, { error: code, ...(detail === undefined ? {} : { detail }) }, noStore);
+  }
+
   async function readBody(req: IncomingMessage): Promise<{ ok: true; value: unknown } | { ok: false; detail: string }> {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -369,7 +385,7 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
     // На служебных путях CORS-заголовка нет вовсе, а preflight отбивается:
     // ручка управления — сервер-серверная, и из браузера её звать нельзя.
     if (req.method === 'OPTIONS') {
-      json(res, 405, { error: 'method_not_allowed', detail: 'служебная ручка только сервер-сервером' }, true);
+      jsonError(res, 405, 'method-not-allowed', 'служебная ручка только сервер-сервером', true);
       return;
     }
     const auth = authorize(req.headers['x-mds-admin-token'], deps.adminToken);
@@ -385,7 +401,7 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
       return;
     }
     if (url.pathname !== '/v1/admin/providers') {
-      json(res, 404, { error: 'not_found' }, true);
+      jsonError(res, 404, 'not-found', undefined, true);
       return;
     }
 
@@ -409,7 +425,7 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
     }
 
     if (req.method !== 'PUT') {
-      json(res, 405, { error: 'method_not_allowed' }, true);
+      jsonError(res, 405, 'method-not-allowed', undefined, true);
       return;
     }
 
@@ -419,12 +435,12 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
           at: new Date(now()).toISOString(),
           actor: 'unknown',
           remote,
-          outcome: 'rejected:bad_body',
+          outcome: 'rejected:bad-body',
           fromVersion: registry?.version ?? null,
           toVersion: null,
           changes: [body.detail],
         });
-        json(res, 400, { error: 'bad_body', detail: body.detail }, true);
+        jsonError(res, 400, 'bad-body', body.detail, true);
         return;
       }
       const actor =
@@ -543,7 +559,7 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
         coverage: summary,
         ...(table
           ? {}
-          : { error: 'registry_unreadable', detail: loadError ?? 'реестр провайдеров не прочитан' }),
+          : { error: 'registry-unreadable', detail: loadError ?? 'реестр провайдеров не прочитан' }),
       });
       return;
     }
@@ -558,7 +574,7 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
         });
         res.end(svg);
       } else {
-        json(res, 404, { error: 'not_found' });
+        jsonError(res, 404, 'not-found');
       }
       return;
     }
@@ -573,7 +589,7 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
       return;
     }
 
-    json(res, 404, { error: 'not_found' });
+    jsonError(res, 404, 'not-found');
   }
 
   return {

@@ -70,7 +70,7 @@ check(
 // Недоступный символ обязан называть причину, а не молча отсутствовать.
 const unknown = await (await fetch(`${MDS}/v1/quotes?symbols=NOSUCHSYM`)).json();
 check(
-  unknown.unavailable?.[0]?.reason === 'not_in_catalog',
+  unknown.unavailable?.[0]?.reason === 'not-in-catalog',
   `причина недоступности названа: ${JSON.stringify(unknown.unavailable?.[0])}`,
 );
 
