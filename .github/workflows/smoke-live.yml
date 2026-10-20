@@ -1,0 +1,135 @@
+name: Смоук против живой биржи
+
+# Принято из предложения зоны `deploy` (OPS-18, Р-077) с одной добавкой:
+# адресат отказа. Р-092 — прогон, у которого нет названного читателя, не
+# заводится вовсе: это тот же механизм, которым смоук умер в прошлый раз.
+#
+# ЗАЧЕМ ОТДЕЛЬНО. Здесь живут три проверки, которые зависят от Binance:
+# правдоподобие цены, приход живого тика за 20 секунд, возраст последнего
+# тика. Чужая сеть иногда не отвечает, и красное от неё — ложная тревога.
+# После двух-трёх ложных тревог красный перестают открывать, и тогда мы
+# теряем не этот прогон, а привычку смотреть на красное вообще.
+#
+# ПОЧЕМУ ОНО ВСЁ-ТАКИ БЛОКИРУЮЩЕЕ ВНУТРИ СЕБЯ. `continue-on-error` дал бы
+# зелёный прогон с жёлтой пометкой, то есть напечатал бы «ok» о непройденной
+# проверке. Здесь прогон краснеет честно — но ничью ветку не держит, потому
+# что на пуш не повешен.
+#
+# ЧЕМ ЗАКРЫТ ОСТАТОЧНЫЙ РИСК. Прогон по расписанию никто не обязан
+# открывать, и это ровно тот механизм, которым смоук умер в прошлый раз.
+# Поэтому на отказе заводится issue в этом же репозитории — у красного
+# появляется место, где он лежит и мозолит глаза. Issue переоткрывается не
+# каждый день: если открытый уже есть, в него дописывается строка.
+on:
+  schedule:
+    - cron: '17 6 * * *'        # ежедневно, время смещено от ровного часа
+  workflow_dispatch:
+
+concurrency:
+  group: smoke-live
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Поднять MDS против настоящего Binance
+        run: |
+          set -euo pipefail
+          QUOTE_STALE_AFTER_MS=60000 \
+          MDS_REGISTRY_PATH=/tmp/mds-live-registry.json \
+          PORT=3003 \
+          node dist/index.js > /tmp/mds.log 2>&1 & echo $! > /tmp/mds.pid
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3003/health || true)
+            [ "$code" = "200" ] || [ "$code" = "503" ] && break
+            sleep 1
+          done
+          # Печатаем ответ целиком: при отказе он и будет диагнозом. Разница
+          # между «биржа не ответила» и «ответила не тем» чинится по-разному,
+          # и схлопывать их в один «смоук упал» нельзя.
+          echo "--- /health перед смоуком ---"
+          curl -s http://127.0.0.1:3003/health | head -c 2000; echo
+
+      # Секрет служебной ручки здесь НЕ НУЖЕН: живая половина про границу
+      # ручки ничего не проверяет, эти проверки целиком в контрактной.
+      - name: Смоук — живая половина
+        id: smoke
+        env:
+          MDS_URL: http://127.0.0.1:3003
+          MDS_SMOKE_MODE: live
+        run: |
+          set +e
+          node scripts/smoke.mjs 2>&1 | tee /tmp/smoke-live.log
+          code=${PIPESTATUS[0]}
+          set -e
+          # Код возврата берётся у node, а не у `tee`: `$?` после конвейера
+          # принадлежит последней команде в нём. На этом уже обжигались.
+          case "$code" in
+            0) echo "Живая половина пройдена." ;;
+            1) echo "ПРОВАЛ: расхождение с живой биржей." >&2; exit 1 ;;
+            3) echo "ПРОВАЛ: часть проверок НЕ ВЫПОЛНЕНА — результат неизвестен." >&2; exit 1 ;;
+            *) echo "ПРОВАЛ: смоук завершился кодом $code — это не результат проверок." >&2; exit 1 ;;
+          esac
+
+      # Адресат отказа. Без него это снова проверка, которую можно не
+      # посмотреть.
+      - name: Завести issue на отказе
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="Смоук против живой биржи красный"
+          BODY=$(printf '%s\n' \
+            "Прогон: $RUN_URL" \
+            "" \
+            "Красной бывает и чужая сеть, и смена формата у биржи — это" \
+            "чинится по-разному, поэтому сначала читаем, ЧТО именно не" \
+            "сошлось, а не «смоук упал»." \
+            "" \
+            '```' \
+            "$(tail -c 3000 /tmp/smoke-live.log 2>/dev/null || echo 'лога нет — прогон упал до смоука')" \
+            '```')
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+            echo "Дописано в открытый issue #$EXISTING — новый не заводим, иначе их перестанут читать."
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "смоук-живой" || \
+              gh issue create --title "$TITLE" --body "$BODY"
+          fi
+
+      # Вывод MDS уведён в файл не ради тишины: фоновый процесс, держащий
+      # stdout шага, не даёт шагу завершиться. Диагностику печатаем здесь —
+      # ошибку не глушат, её показывают.
+      - name: Лог поднятого
+        if: always()
+        run: |
+          echo "===== /tmp/mds.log ====="
+          tail -c 4000 /tmp/mds.log 2>/dev/null || echo "(файла нет)"
+
+      - name: Снять поднятое
+        if: always()
+        run: |
+          [ -f /tmp/mds.pid ] && kill "$(cat /tmp/mds.pid)" 2>/dev/null || true
+          wait 2>/dev/null || true
