@@ -6,6 +6,7 @@ import {
   TwelveDataProvider,
   type TwelveDataConfig,
 } from './twelvedata.js';
+import { normalizeTick } from './binance.js';
 import type { CatalogInstrument, Quote } from '../types.js';
 
 /**
@@ -31,6 +32,16 @@ function instrument(symbol: string, providerSymbol: string): CatalogInstrument {
 
 const EURUSD = instrument('EURUSD', 'EUR/USD');
 const GBPUSD = instrument('GBPUSD', 'GBP/USD');
+/** Крипто-инструмент для сверки двух адаптеров про одну величину. */
+const BTCUSD: CatalogInstrument = {
+  symbol: 'BTCUSD',
+  name: 'Bitcoin',
+  category: 'crypto',
+  segment: null,
+  digits: 0,
+  provider: 'binance',
+  providerSymbol: 'btcusdt',
+};
 
 const CFG: TwelveDataConfig = {
   id: 'twelvedata',
@@ -155,16 +166,61 @@ describe('normalizeTwelveQuote · успешный разбор ≠ пригод
     expect(normalizeTwelveQuote({}, EURUSD, 'twelvedata')).toBeNull();
   });
 
-  it('отсутствующий percent_change → 0, и это осознанно: он не цена', () => {
-    // Умолчание в проценте изменения — косметика; умолчание в цене — авария.
-    // Разница названа здесь, чтобы следующий не «исправил» её единообразия ради.
-    expect(normalizeTwelveQuote({ close: '1.1' }, EURUSD, 'twelvedata')?.changePercent).toBe(0);
+  it('отсутствующий percent_change — отказ, а не ноль (QA-05)', () => {
+    // ~~Было: «умолчание в проценте изменения — косметика, в цене — авария;
+    // разница названа здесь, чтобы следующий не исправил её единообразия
+    // ради».~~ Отменено 20.10. Обоснование было честным и устарело:
+    // границы просматривают НАЧИНАЯ с полей, которые отображаются цветом,
+    // стрелкой или знаком, а `changePercent` — ровно такое. Ноль со знаком
+    // рисуется как «+0.00%», то есть как утверждение «рынок стоял», тогда
+    // как известно только «процент не разобрали».
+    expect(
+      normalizeTwelveQuote({ close: '1.1', timestamp: 1784990000 }, EURUSD, 'twelvedata'),
+    ).toBeNull();
   });
 
-  it('без timestamp берётся наше время, а не ноль', () => {
-    // ts = 0 у потребителя означает «котировки нет» (§5г): подставить его
-    // значило бы объявить живую цену отсутствующей.
-    const quote = normalizeTwelveQuote({ close: '1.1' }, EURUSD, 'twelvedata');
-    expect(quote?.ts).toBeGreaterThan(1_700_000_000_000);
+  it('соседний адаптер про ту же величину отвечает так же', () => {
+    // Вторая половина находки QA-05: два ответа одного сервиса про одну
+    // величину обязаны говорить одинаково. `binance.normalizeTick` отвергал
+    // тик с неразобранным changePercent с самого начала — правильный ответ
+    // лежал рядом с неправильным и маскировал его. Тест-растяжка: если
+    // кто-то вернёт подстановку в один из двух адаптеров, покраснеет здесь.
+    const bySymbol = new Map([[ 'btcusdt', BTCUSD ]]);
+    expect(
+      normalizeTick({ e: '24hrTicker', E: 1784990000000, s: 'BTCUSDT', c: '64034.52', P: 'нечисло' }, bySymbol, 'binance'),
+    ).toBeNull();
+    expect(
+      normalizeTwelveQuote({ close: '1.1', percent_change: 'нечисло', timestamp: 1784990000 }, EURUSD, 'twelvedata'),
+    ).toBeNull();
+  });
+
+  it('без timestamp — отказ: выдуманный момент не протухает никогда (QA-05)', () => {
+    // ~~Было: «ts = 0 означает „котировки нет“ (§5г), подставить его значило
+    // бы объявить живую цену отсутствующей» → брали Date.now().~~
+    // Отменено 20.10. Про `0` рассуждение верное, но из него не следует,
+    // что верен `Date.now()`: исходов три, рассмотрено было два.
+    //
+    // Цена не косметическая: `ts` течёт прямо в фильтр свежести
+    // (`hub.pick`: at - quote.ts > staleAfterMs), поэтому котировка с
+    // выдуманным моментом НЕ ПРОТУХАЕТ НИКОГДА — источник, отвечающий без
+    // времени, выдавал бы вчерашнюю цену как текущую бесконечно.
+    expect(normalizeTwelveQuote({ close: '1.1', percent_change: '0.5' }, EURUSD, 'twelvedata')).toBeNull();
+    // Ноль — это отсутствие поля, а не момент: эпоха 1970 котировкой не бывает.
+    expect(
+      normalizeTwelveQuote({ close: '1.1', percent_change: '0.5', timestamp: 0 }, EURUSD, 'twelvedata'),
+    ).toBeNull();
+  });
+
+  it('пригодная запись проходит целиком и момент берётся от источника', () => {
+    // Эталонный случай ОГРАНИЧИВАЮЩИЙ не бывает — этот разрешающий нужен,
+    // чтобы отказы выше не проходили по причине «отвергаем вообще всё».
+    const quote = normalizeTwelveQuote(
+      { close: '1.08543', percent_change: '-0.25', timestamp: 1784990000 },
+      EURUSD,
+      'twelvedata',
+    );
+    expect(quote?.price).toBe(1.08543);
+    expect(quote?.changePercent).toBe(-0.25);
+    expect(quote?.ts).toBe(1784990000000);
   });
 });

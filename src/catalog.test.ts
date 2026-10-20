@@ -70,11 +70,15 @@ describe('normalizeTwelveQuote (Twelve Data /quote → Quote контракта 
     });
   });
 
-  it('мусорная цена отбрасывается, отсутствующий percent_change → 0', async () => {
+  it('мусорная цена отбрасывается; отсутствующий percent_change — тоже (QA-05)', async () => {
     const { normalizeTwelveQuote } = await import('./providers/twelvedata.js');
     const eurusd = CATALOG.find((i) => i.symbol === 'EURUSD')!;
     expect(normalizeTwelveQuote({ close: 'abc' }, eurusd, 'twelvedata')).toBeNull();
-    expect(normalizeTwelveQuote({ close: '1.1' }, eurusd, 'twelvedata')?.changePercent).toBe(0);
+    // До 20.10 здесь ожидался `changePercent === 0`. Отменено: поле
+    // окрашивается, и ноль со знаком читается как утверждение о рынке.
+    expect(
+      normalizeTwelveQuote({ close: '1.1', timestamp: 1784990000 }, eurusd, 'twelvedata'),
+    ).toBeNull();
   });
 });
 
