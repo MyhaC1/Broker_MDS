@@ -313,6 +313,45 @@ describe('/health · состояние реестра провайдеров', 
     expect(body.reason).not.toContain('QUOTE_STALE_AFTER_MS');
   });
 
+  it('реестр не прочитан → охват null, а не ноль (QA-05)', () => {
+    // «Осмотрено 0» и «не считали» — разные утверждения. Ноль здесь был бы
+    // `empty` на месте `missing`: охват, объявленный числом, превращает
+    // «нечего было проверять» в «проверено».
+    const { body } = health({
+      registry: {
+        origin: 'error',
+        error: 'JSON: Unexpected token',
+        version: null,
+        providers: [],
+        routed: null,
+        checked: null,
+        missingKeys: [],
+      },
+    });
+    expect(body.registry.routed).toBeNull();
+    expect(body.registry.checked).toBeNull();
+    // И `0` сюда попасть не должен ни под каким видом: именно он читался
+    // как «посчитали».
+    expect(body.registry.routed).not.toBe(0);
+  });
+
+  it('маршрутизация есть, назначенных ноль — это ДРУГОЕ состояние, и число настоящее', () => {
+    // Разрешающий эталонный случай рядом с ограничивающим: без него
+    // проверка выше проходила бы и при «всегда null».
+    const { body } = health({
+      registry: {
+        origin: 'file',
+        version: 1,
+        providers: [{ id: 'binance', enabled: false, silent: false }],
+        routed: 0,
+        checked: 484,
+        missingKeys: [],
+      },
+    });
+    expect(body.registry.routed).toBe(0);
+    expect(body.registry.checked).toBe(484);
+  });
+
   it('пустой реестр ≠ выключенный источник — это разные причины', () => {
     const empty = health({
       registry: { origin: 'file', version: 1, providers: [], routed: 0, checked: 0, missingKeys: [] },

@@ -35,6 +35,45 @@ export interface TwelveDataConfig {
   creditsPerDay: number;
 }
 
+/**
+ * Разбор котировки Twelve Data. `null` вместо котировки, если непригодна
+ * хоть одна из трёх величин: цена, изменение, момент.
+ *
+ * **Поправка 20.10 (QA-05).** Здесь стояли два умолчания, и оба были
+ * записаны как осознанные — с объяснением рядом, как и положено. Одно
+ * обоснование устарело, второе оказалось неполным.
+ *
+ * 1. ~~`changePercent` → 0: «умолчание в проценте изменения — косметика».~~
+ *    **Отменено.** Приём, выведенный терминалом: границы просматривают
+ *    начиная с полей, которые отображаются **цветом, стрелкой или знаком**.
+ *    `changePercent` — ровно такое поле: ноль со знаком рисуется как
+ *    «+0.00%», то есть как **утверждение о рынке**, а знали мы только
+ *    «процент не разобрали». Прочерк читается как «неизвестно» мгновенно,
+ *    зелёный ноль — нет.
+ *
+ *    И вторая половина той же находки: **два ответа одного сервиса про одну
+ *    величину обязаны говорить одинаково.** Соседний адаптер (`binance.ts`,
+ *    `normalizeTick`) с самого начала отвергает тик целиком при
+ *    неразобранном `changePercent`. Правильный ответ лежал рядом с
+ *    неправильным — и маскировал его.
+ *
+ * 2. ~~Нет `timestamp` — берём своё время, иначе `ts: 0` означало бы
+ *    «котировки нет».~~ **Отменено.** Про `0` рассуждение верное, но из
+ *    него не следует, что верен `Date.now()`: исходов три, а рассмотрено
+ *    было два. `Date.now()` утверждает «цена получена сейчас», а известно
+ *    только «момента нам не прислали».
+ *
+ *    Цена этого умолчания не косметическая. `ts` течёт прямо в фильтр
+ *    свежести (`hub.pick`: `at - quote.ts > staleAfterMs`), поэтому
+ *    котировка с выдуманным моментом **не протухает никогда**. Источник,
+ *    отвечающий телом без времени, выдавал бы вчерашнюю цену как текущую
+ *    бесконечно — против этого и написан §5г, ради этого MDS вообще держит
+ *    порог свежести.
+ *
+ * Отказ здесь **fail-closed и не молчаливый**: вызывающий считает
+ * отброшенные записи и называет их числом (`dropped`), иначе «источник
+ * ничего не прислал» было бы неотличимо от «всё отбросили».
+ */
 export function normalizeTwelveQuote(
   entry: TwelveQuote,
   instrument: CatalogInstrument,
@@ -43,14 +82,19 @@ export function normalizeTwelveQuote(
   const price = Number.parseFloat(entry.close ?? '');
   const changePercent = Number.parseFloat(entry.percent_change ?? '');
   if (!Number.isFinite(price)) return null;
+  if (!Number.isFinite(changePercent)) return null;
+  // Ноль здесь тоже непригоден: эпоха 1970 — не момент котировки, а признак
+  // того, что поля не было. Разбор и пригодность — разные барьеры.
+  const seconds = entry.timestamp;
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return null;
   return {
     symbol: instrument.symbol,
     name: instrument.name,
     category: instrument.category,
     price,
     digits: instrument.digits,
-    changePercent: Number.isFinite(changePercent) ? changePercent : 0,
-    ts: entry.timestamp ? entry.timestamp * 1000 : Date.now(),
+    changePercent,
+    ts: seconds * 1000,
     source: sourceId,
   };
 }
@@ -90,6 +134,12 @@ export class TwelveDataProvider {
   private timer: ReturnType<typeof setTimeout> | null = null;
   status: ProviderStatus = 'connecting';
   lastTickAt = 0;
+  /**
+   * Сколько записей отброшено как непригодные за жизнь процесса. Нужен,
+   * чтобы «источник молчит» было отличимо от «источник отвечает, и всё
+   * отвечаемое мы выбрасываем»: снаружи оба выглядят одинаково — цены нет.
+   */
+  droppedTotal = 0;
 
   constructor(
     private readonly onQuote: (q: Quote) => void,
@@ -164,6 +214,7 @@ export class TwelveDataProvider {
       }
 
       let gotAny = false;
+      const dropped: string[] = [];
       for (const instrument of chunk) {
         const entry =
           chunk.length === 1
@@ -183,7 +234,22 @@ export class TwelveDataProvider {
           gotAny = true;
           this.lastTickAt = Date.now();
           this.onQuote(quote);
+        } else {
+          // Отброшенное считаем и называем. Мягкий разбор означает «не
+          // падает», а не «исчезает без следа»: без счётчика «источник
+          // ничего не прислал» неотличимо от «всё пришедшее отбросили», а
+          // чинятся они по-разному. Отброс стал возможен чаще с QA-05 —
+          // тем нужнее след.
+          dropped.push(instrument.providerSymbol);
+          this.droppedTotal += 1;
         }
+      }
+      if (dropped.length > 0) {
+        console.warn(
+          `[twelvedata] отброшено ${dropped.length} записей из ${chunk.length}: ` +
+            'непригодны цена, изменение или момент (QA-05, умолчания сняты). ' +
+            `Символы: ${dropped.slice(0, 10).join(', ')}. Всего за жизнь процесса: ${this.droppedTotal}.`,
+        );
       }
       if (gotAny) this.status = 'connected';
       this.chunkIndex += 1;

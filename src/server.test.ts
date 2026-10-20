@@ -429,6 +429,40 @@ describe('состояния, которые нельзя путать, видн
     expect(quotes.unavailable).toEqual([{ symbol: 'BTCUSD', reason: 'registry-unreadable' }]);
   });
 
+  it('реестр не прочитан: обе ручки говорят про охват ОДИНАКОВО (QA-05)', async () => {
+    // Вторая половина находки QA-05. `/v1/instruments` отдавал
+    // `coverage: null` правильно с самого начала, а `/health` на том же
+    // состоянии печатал `routed: 0, checked: 0` — «считали, назначенных
+    // ноль». Правильный ответ рядом с неправильным маскировал его.
+    //
+    // Проверка стоит ЗДЕСЬ, а не в модульном наборе: подстановка жила в
+    // проводке (`server.ts`), а не в `buildHealth`. Модульный тест зовёт
+    // функцию сам, и «кто ей что передал» для него неотличимо.
+    const h = await boot({ origin: 'error', error: 'JSON: сломан на 3 строке' });
+
+    const health = await asJson(await fetch(`${h.base}/health`));
+    const instruments = await asJson(await fetch(`${h.base}/v1/instruments`));
+
+    expect(health.registry.routed).toBeNull();
+    expect(health.registry.checked).toBeNull();
+    expect(instruments.coverage).toBeNull();
+    // Утверждение не про `null` само по себе, а про СОГЛАСИЕ двух ответов:
+    // если кто-то вернёт подстановку в одну из ручек, покраснеет здесь.
+    expect(health.registry.routed === null).toBe(instruments.coverage === null);
+  });
+
+  it('реестр прочитан: обе ручки дают НАСТОЯЩИЕ числа, а не null (QA-05)', async () => {
+    // Разрешающий случай рядом с ограничивающим: без него проверка выше
+    // проходила бы и при «всегда null», то есть при другом дефекте.
+    const h = await boot({});
+    const health = await asJson(await fetch(`${h.base}/health`));
+    const instruments = await asJson(await fetch(`${h.base}/v1/instruments`));
+    expect(typeof health.registry.checked).toBe('number');
+    expect(health.registry.checked).toBeGreaterThan(0);
+    expect(instruments.coverage?.checked).toBe(health.registry.checked);
+    expect(instruments.coverage?.routed).toBe(health.registry.routed);
+  });
+
   it('реестр не прочитан → источники не запущены вовсе', async () => {
     const h = await boot({ origin: 'error' });
     expect(() => h.tick('binance', 'BTCUSD', 1)).toThrow(/не запущен/);

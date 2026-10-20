@@ -330,8 +330,12 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
         enabled: p.enabled,
         silent: silent.has(p.id),
       })),
-      routed: summary?.routed ?? 0,
-      checked: summary?.checked ?? 0,
+      // `null`, а не `0`: таблицы маршрутизации нет — значит мы не
+      // считали, а не насчитали ноль. То же, что `coverage: null` у
+      // `/v1/instruments` (QA-05: два ответа про одну величину
+      // обязаны говорить одинаково).
+      routed: summary === null ? null : summary.routed,
+      checked: summary === null ? null : summary.checked,
       missingKeys: [...missingKeys],
     };
   }

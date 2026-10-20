@@ -39,14 +39,22 @@ const INTEGRATION = [
  */
 function assertSetsCoverDisk() {
   const onDisk = [];
+  const SKIP = new Set(['node_modules', 'dist', '.git', '.github']);
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = `${dir}/${entry.name}`;
+      if (SKIP.has(entry.name)) continue;
+      const full = dir === '.' ? entry.name : `${dir}/${entry.name}`;
       if (entry.isDirectory()) walk(full);
       else if (entry.name.endsWith('.test.ts')) onDisk.push(full);
     }
   };
-  walk('src');
+  // Обходим КОРЕНЬ, а не только `src`. Первая версия этого сторожа ходила
+  // по `src` — и файл проверок, положенный рядом (в `tests/`, в корне),
+  // был бы невидим и ему, и проверке типов: `tsconfig.test.json` тоже
+  // привязан к `src/**/*.ts`. Прогон (`vitest run`) при этом подхватил бы
+  // его откуда угодно. Сторож, слепой ровно там, где слеп охват, не
+  // сторож.
+  walk('.');
   const classified = new Set([...UNIT, ...INTEGRATION]);
   const unclassified = onDisk.filter((f) => !classified.has(f));
   const vanished = [...classified].filter((f) => !onDisk.includes(f));
@@ -159,6 +167,27 @@ const MUTATIONS = [
     from: "  'registry-unreadable',\n] as const;",
     to: "  'registry-unreadable',\n  'source-unhappy',\n] as const;",
     expect: 'модульный: состав оси символа разошёлся с контрактом',
+  },
+  {
+    name: 'умолчание: changePercent подставляется нулём (QA-05)',
+    file: 'src/providers/twelvedata.ts',
+    from: '  if (!Number.isFinite(changePercent)) return null;',
+    to: '  const changePercentOr0 = Number.isFinite(changePercent) ? changePercent : 0;',
+    expect: 'модульный: окрашиваемое поле снова врёт «рынок стоял»',
+  },
+  {
+    name: 'умолчание: момент котировки подставляется нашим временем (QA-05)',
+    file: 'src/providers/twelvedata.ts',
+    from: '  if (typeof seconds !== \'number\' || !Number.isFinite(seconds) || seconds <= 0) return null;',
+    to: '  if (typeof seconds !== \'number\' || !Number.isFinite(seconds) || seconds <= 0) {\n    return { symbol: instrument.symbol, name: instrument.name, category: instrument.category, price, digits: instrument.digits, changePercent, ts: Date.now(), source: sourceId };\n  }',
+    expect: 'модульный: котировка с выдуманным моментом не протухает никогда',
+  },
+  {
+    name: 'охват: /health снова объявляет ноль вместо «не считали» (QA-05)',
+    file: 'src/server.ts',
+    from: '      routed: summary === null ? null : summary.routed,\n      checked: summary === null ? null : summary.checked,',
+    to: '      routed: summary?.routed ?? 0,\n      checked: summary?.checked ?? 0,',
+    expect: 'интеграционный: две ручки расходятся в ответе про одну величину',
   },
 ];
 
