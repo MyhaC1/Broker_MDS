@@ -24,6 +24,10 @@ function quote(symbol: string, ageMs: number, price = 100): Quote {
     price,
     digits: 2,
     changePercent: 1.5,
+    // Несимметричные вокруг цены нарочно: симметричный спред прошёл бы и
+    // при перепутанных местами полях.
+    bid: price - 0.3,
+    ask: price + 0.7,
     ts: NOW - ageMs,
     source: 'binance',
   };
@@ -228,6 +232,42 @@ describe('QuoteHub · живой батч', () => {
     const batch = await nextBatch(socket, 2_000);
     expect(batch).not.toBe('silence');
     expect((batch as Quote[])[0]?.price).toBe(70_000);
+  });
+
+  it('лучшие цены доезжают до сокета, а не теряются по дороге (MDS-12)', async () => {
+    // Разбор, доказанный у провайдера, ничего не говорит о проводе: поле
+    // может быть прочитано и потеряно между хабом и сокетом. Проверяется
+    // то, что ПРИШЛО подписчику, а не то, что положили в хаб.
+    const { hub, server } = makeHub({ staleAfterMs: 10_000 });
+    const socket = await connect(await listen(server));
+    socket.emit('subscribe', ['BTCUSD']);
+    await new Promise((r) => setTimeout(r, 100));
+
+    hub.push(quote('BTCUSD', 0, 70_000));
+    const batch = await nextBatch(socket, 2_000);
+    expect(batch).not.toBe('silence');
+    const got = (batch as Quote[])[0];
+    expect(got?.bid).toBe(69_999.7);
+    expect(got?.ask).toBe(70_000.7);
+  });
+
+  it('пустые лучшие цены доезжают ПУСТЫМИ, а не исчезают из тела', async () => {
+    // Исчезнувшее поле и поле со значением `null` — разные сообщения:
+    // первое потребитель прочитает как «сосед ещё не шлёт», второе как
+    // «шлёт, и у него этого нет». Второй поставщик даёт ровно второе.
+    const { hub, server } = makeHub({ staleAfterMs: 10_000 });
+    const socket = await connect(await listen(server));
+    socket.emit('subscribe', ['XAUUSD']);
+    await new Promise((r) => setTimeout(r, 100));
+
+    hub.push({ ...quote('XAUUSD', 0, 2_400), bid: null, ask: null });
+    const batch = await nextBatch(socket, 2_000);
+    expect(batch).not.toBe('silence');
+    const got = (batch as Quote[])[0] as Quote;
+    expect(got.bid).toBeNull();
+    expect(got.ask).toBeNull();
+    expect('bid' in got).toBe(true);
+    expect('ask' in got).toBe(true);
   });
 
   it('протухший тик не доходит: фильтр стоит и на пути батча', async () => {

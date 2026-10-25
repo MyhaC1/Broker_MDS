@@ -94,6 +94,22 @@ export function normalizeTwelveQuote(
     price,
     digits: instrument.digits,
     changePercent,
+    /*
+      Лучших цен этот источник не даёт, и это **заявление, а не
+      умолчание** (MDS-12). Живой ответ `/quote` от 25.10 несёт symbol,
+      name, exchange, datetime, timestamp, last_quote_at, open, high, low,
+      close, previous_close, change, percent_change, is_market_open и
+      fifty_two_week — ни `bid`, ни `ask`.
+
+      Оговорка, которую надо держать на виду: ответ снят ДЕМОНСТРАЦИОННЫМ
+      ключом, своего у нас нет, и часть их ручек он отдаёт как 403. Живым
+      кадром с платного тарифа это не проверено. За вывод — их собственная
+      спецификация: во всём документе `bid`/`ask` встречаются ровно в одной
+      схеме, цепочке опционов. Появится платный ключ — проверять первым
+      делом здесь.
+    */
+    bid: null,
+    ask: null,
     ts: seconds * 1000,
     source: sourceId,
   };

@@ -76,6 +76,11 @@ interface Harness {
   base: string;
   /** Подать тик от имени источника — как если бы он прилетел из сети. */
   tick(providerId: string, symbol: string, price: number, ts?: number): void;
+  /**
+   * Тик без стакана — так выглядит всё, что приходит от второго
+   * поставщика: цена есть, лучших цен нет (MDS-12).
+   */
+  tickWithoutBook(providerId: string, symbol: string, price: number): void;
   /** Что сейчас назначено источнику. */
   assigned(providerId: string): string[];
   setClock(ms: number): void;
@@ -167,7 +172,29 @@ async function boot(options: {
         price,
         digits: entry.digits,
         changePercent: 0,
+        // Лучшие цены несимметричны вокруг цены нарочно: симметричный спред
+        // прошёл бы и при перепутанных местами полях.
+        bid: price - 0.3,
+        ask: price + 0.7,
         ts: ts ?? clock,
+        source: providerId,
+      });
+    },
+    tickWithoutBook(providerId, symbol, price) {
+      const emit = emitters.get(providerId);
+      if (!emit) throw new Error(`источник ${providerId} не запущен — тик подавать некому`);
+      lastTick.set(providerId, clock);
+      const entry = CATALOG.find((i) => i.symbol === symbol && i.provider === providerId)!;
+      emit({
+        symbol,
+        name: entry.name,
+        category: entry.category,
+        price,
+        digits: entry.digits,
+        changePercent: 0,
+        bid: null,
+        ask: null,
+        ts: clock,
         source: providerId,
       });
     },
@@ -411,6 +438,27 @@ describe('служебная ручка · приём изменения', () =>
     const res = await put(h, twoSourceRegistry());
     expect(res.status).toBe(503);
     expect((await asJson(res)).error).toBe('registry-unreadable');
+  });
+});
+
+describe('лучшие цены на проводе · сквозь весь сервис (MDS-12)', () => {
+  it('bid и ask доезжают до /v1/quotes, а не теряются между хабом и ручкой', async () => {
+    const h = await boot({});
+    h.tick('binance', 'BTCUSD', 70_000);
+    const body = await asJson(await fetch(`${h.base}/v1/quotes?symbols=BTCUSD`));
+    expect(body.items[0]?.bid).toBe(69_999.7);
+    expect(body.items[0]?.ask).toBe(70_000.7);
+  });
+
+  it('пустые лучшие цены ПРИСУТСТВУЮТ в теле со значением null, а не исчезают', async () => {
+    // «Поля нет» и «поле пустое» — разные сообщения: первое читается как
+    // «сосед ещё не шлёт», второе как «шлёт, и у него этого нет».
+    const h = await boot({});
+    h.tickWithoutBook('twelvedata', 'XAUUSD', 2_400);
+    const body = await asJson(await fetch(`${h.base}/v1/quotes?symbols=XAUUSD`));
+    expect(body.items[0]?.price).toBe(2_400);
+    expect(body.items[0]).toHaveProperty('bid', null);
+    expect(body.items[0]).toHaveProperty('ask', null);
   });
 });
 

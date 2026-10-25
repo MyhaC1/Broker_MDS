@@ -161,6 +161,8 @@ describe('/v1/quotes · тело ответа', () => {
         price: 70_000,
         digits: 0,
         changePercent: 1,
+        bid: 69_999,
+        ask: 70_001,
         ts: NOW,
         source: 'binance',
       },
