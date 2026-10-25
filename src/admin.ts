@@ -43,7 +43,16 @@ export type AuthOutcome =
    * пустили» разные диагнозы, и путать их значит отправлять чинить не то.
    */
   | { ok: false; code: Extract<AdminCode, 'control-plane-disabled'>; status: 503; detail: string }
-  | { ok: false; code: Extract<AdminCode, 'unauthorized'>; status: 401; detail: UnauthorizedDetail };
+  /**
+   * Не пустили, и **причина едет самим кодом** (Р-339, решение штаба 25.10).
+   *
+   * Раньше здесь стоял общий `unauthorized`, а причина пряталась в
+   * `detail`. Это было **особым случаем, а не уровнем абстракции**: у всех
+   * прочих отказов этой ручки конкретная причина едет кодом, и только у
+   * проверки доступа было иначе. Довода про скрытность не было — уточнение
+   * и так называло, отсутствовал токен или был неверен.
+   */
+  | { ok: false; code: Extract<AdminCode, 'no-token' | 'bad-token'>; status: 401; detail: string };
 
 /**
  * Все машинные коды отказа служебной ручки, перечнем, который видно в
@@ -58,7 +67,12 @@ export type AuthOutcome =
  */
 export const ADMIN_CODES = [
   'control-plane-disabled',
-  'unauthorized',
+  /**
+   * Не пустили. Два кода, а не один общий с уточнением (Р-339): причина
+   * едет кодом, как у всех остальных отказов этой ручки.
+   */
+  'no-token',
+  'bad-token',
   'registry-unreadable',
   'bad-body',
   'version-required',
@@ -75,10 +89,13 @@ export const ADMIN_CODES = [
 
 export type AdminCode = (typeof ADMIN_CODES)[number];
 
-/** Уточнение к `unauthorized`: заголовка не было или он не тот. */
-export const UNAUTHORIZED_DETAILS = ['no-token', 'bad-token'] as const;
-
-export type UnauthorizedDetail = (typeof UNAUTHORIZED_DETAILS)[number];
+/*
+  Перечня `UNAUTHORIZED_DETAILS` здесь больше нет (Р-339): `no-token` и
+  `bad-token` стали полноценными кодами в `ADMIN_CODES`. Второй перечень
+  рядом с первым и был тем, из-за чего сверка состава с §4г не сходилась —
+  контракт перечислял эти имена в общем ряду, а код держал их отдельной
+  осью. Одна ось вместо полутора.
+*/
 
 /** Короткий секрет создаёт видимость защиты, поэтому он не секрет, а ошибка настройки. */
 export const MIN_ADMIN_TOKEN_LENGTH = 24;
@@ -114,7 +131,12 @@ export function authorize(header: string | string[] | undefined, configured: str
   }
   const supplied = Array.isArray(header) ? header[0] : header;
   if (supplied === undefined || supplied === '') {
-    return { ok: false, code: 'unauthorized', status: 401, detail: 'no-token' };
+    return {
+      ok: false,
+      code: 'no-token',
+      status: 401,
+      detail: 'заголовок x-mds-admin-token не прислан',
+    };
   }
   const a = Buffer.from(supplied, 'utf8');
   const b = Buffer.from(configured, 'utf8');
@@ -122,7 +144,9 @@ export function authorize(header: string | string[] | undefined, configured: str
   // разной длины), поэтому сравниваем её отдельно и явно, а содержимое — за
   // постоянное время.
   const equal = a.length === b.length && timingSafeEqual(a, b);
-  return equal ? { ok: true } : { ok: false, code: 'unauthorized', status: 401, detail: 'bad-token' };
+  return equal
+    ? { ok: true }
+    : { ok: false, code: 'bad-token', status: 401, detail: 'секрет не совпал' };
 }
 
 export interface AdminView {

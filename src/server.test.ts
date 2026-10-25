@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { applyRegistryUpdate } from './admin.js';
+import { ADMIN_CODES, applyRegistryUpdate } from './admin.js';
 import { builtinRegistry, type ProviderEntry, type Registry } from './registry.js';
 import { loadRegistry } from './registry-store.js';
 import { createMdsServer, type MdsServer, type RunningProvider } from './server.js';
@@ -257,11 +257,24 @@ describe('служебная ручка · кто имеет право её з�
   });
 
   it('нет заголовка → 401 no-token, чужой секрет → 401 bad-token', async () => {
+    // Причина едет САМИМ КОДОМ (Р-339). До 25.10 код был общий
+    // (`unauthorized`), а причина пряталась в `detail` — особый случай
+    // против всех прочих отказов этой ручки, где код конкретен.
     const h = await boot({});
-    expect((await asJson(await admin(h, { token: null }))).detail).toBe('no-token');
-    expect((await asJson(await admin(h, { token: 'ne-tot-sekret-dlinoyu-podlinnee' }))).detail).toBe(
+    expect((await asJson(await admin(h, { token: null }))).error).toBe('no-token');
+    expect((await asJson(await admin(h, { token: 'ne-tot-sekret-dlinoyu-podlinnee' }))).error).toBe(
       'bad-token',
     );
+  });
+
+  it('detail остался пояснением для человека, а не вторым машинным именем', async () => {
+    // Два машинных имени на одно состояние — это и есть то, из-за чего
+    // сверка состава с §4г не сходилась. Теперь `detail` — текст, и ни в
+    // одном словаре он не числится.
+    const h = await boot({});
+    const body = await asJson(await admin(h, { token: null }));
+    expect(body.detail).toContain('x-mds-admin-token');
+    expect((ADMIN_CODES as readonly string[]).includes(body.detail)).toBe(false);
   });
 
   it('из браузера не дотянуться: preflight отбит и CORS-заголовка на ручке нет', async () => {

@@ -275,6 +275,15 @@ const MUTATIONS = [
     expect: 'модульный: до 25.10 эта мутация не красила НИЧЕГО — сверялся только стиль',
   },
   {
+    name: 'словарь Р-339: причина отказа в доступе снова прячется в detail',
+    file: 'src/admin.ts',
+    from: "  'no-token',\n  'bad-token',",
+    to: "  'unauthorized',",
+    expect:
+      'модульный: состав оси расходится с §4г. Это та мутация, которая стережёт ' +
+      'возврат к общему коду с уточнением — именно из-за него сверка и не сходилась',
+  },
+  {
     name: 'охват: /health снова объявляет ноль вместо «не считали» (QA-05)',
     file: 'src/server.ts',
     from: '      routed: summary === null ? null : summary.routed,\n      checked: summary === null ? null : summary.checked,',
