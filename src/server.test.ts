@@ -121,7 +121,13 @@ async function boot(options: {
         : { origin, registry, path },
     staleAfterMs: options.staleAfterMs === undefined ? STALE_AFTER : options.staleAfterMs,
     adminToken: 'adminToken' in options ? options.adminToken : TOKEN,
-    allowRoutingIdentityChange: options.allowRoutingIdentityChange ?? false,
+    // Поле НЕ передаётся, когда его не просили: иначе боевое умолчание
+    // (`?? false` в server.ts) не исполняется ни разу, и мутация «умолчание
+    // разрешает» не красит ничего — проверено, именно так и вышло.
+    // Стенд, подставляющий значение за боевой код, проверяет не ту систему.
+    ...('allowRoutingIdentityChange' in options
+      ? { allowRoutingIdentityChange: options.allowRoutingIdentityChange }
+      : {}),
     keys: options.keys ?? new Map(),
     now: () => clock,
     routingRecheckMs: 1_000_000, // пересчёт зовём руками, чтобы не ловить гонку
@@ -354,6 +360,19 @@ describe('служебная ручка · приём изменения', () =>
     // И оговорка про живой каталог: без неё отказ выглядит необъяснимым,
     // когда биржа сама добавит пару и вчерашняя правка перестанет проходить.
     expect(detail).toContain('ЖИВОМУ каталогу');
+  });
+
+  it('УМОЛЧАНИЕ — ЗАПРЕЩЕНО: поле не передано вовсе, запрет всё равно работает', async () => {
+    // Проверяется именно боевое умолчание, а не то, что подставил стенд:
+    // переключатель, открытый по умолчанию, — это отсутствующий запрет с
+    // видимостью запрета, и увидеть его отсутствие можно только здесь.
+    const h = await boot({});
+    expect('allowRoutingIdentityChange' in {}).toBe(false);
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 5 } : p));
+    const res = await put(h, next);
+    expect(res.status).toBe(409);
+    expect((await asJson(res)).error).toBe('routing-identity-change');
   });
 
   it('переключатель снят → та же правка проходит: запрет не вечный, а ожидание', async () => {

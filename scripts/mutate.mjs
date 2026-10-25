@@ -183,6 +183,63 @@ const MUTATIONS = [
     expect: 'модульный: котировка с выдуманным моментом не протухает никогда',
   },
   {
+    name: 'запрет Р-318: сторож смены личности снят целиком',
+    file: 'src/admin.ts',
+    from: '  if (!guard.allowIdentityChange) {',
+    to: '  if (false) {',
+    expect: 'интеграционный: правка подменяет источник живому символу',
+  },
+  {
+    name: 'запрет Р-318: СЛАБАЯ ФОРМА — считаем кандидатов вместо личности',
+    file: 'src/registry.ts',
+    from: '    if (from !== null && to !== null) out.push({ symbol, from, to });',
+    to:
+      '    const weak = (after.routes.get(symbol)?.candidates.length ?? 0) > 1;\n' +
+      '    if (weak && from !== null && to !== null) out.push({ symbol, from, to });',
+    expect:
+      'модульный: обязана покрасить РОВНО ОДИН тест — перестановку ' +
+      'categoryPrecedence. У EURUSD кандидат один, и слабая форма его не видит; ' +
+      'у XAUUSD кандидата два, поэтому «приоритет источника переставлен» обязан ' +
+      'остаться ЗЕЛЁНЫМ. Это та мутация, которая отличает сторожа по личности от ' +
+      'сторожа по числу, и любой лишний красный здесь означает, что она ломает ' +
+      'форму вывода, а не предикат',
+  },
+  {
+    name: 'запрет Р-318: переключатель открыт по умолчанию',
+    file: 'src/server.ts',
+    from: 'allowIdentityChange: deps.allowRoutingIdentityChange ?? false,',
+    to: 'allowIdentityChange: deps.allowRoutingIdentityChange ?? true,',
+    expect: 'интеграционный: умолчание разрешает то, что запрещено',
+  },
+  {
+    name: 'тревога Р-317: число кандидатов не считается (всегда ноль)',
+    file: 'src/registry.ts',
+    from: '    if (route.candidates.length > 1) multiCandidate += 1;',
+    to: '    void route;',
+    expect: 'модульный: нулевой охват снова неотличим от успеха',
+  },
+  {
+    name: 'тревога Р-317: тревога переведена в degraded — исправная служба встаёт',
+    file: 'src/api.ts',
+    from: "    status: reason === null ? 'ok' : 'degraded',",
+    to: "    status: reason === null && warning === null ? 'ok' : 'degraded',",
+    expect: 'модульный: сервис снимается с раздачи (503) из-за настройки',
+  },
+  {
+    name: 'тревога Р-317: «не считали» поднимает тревогу наравне с находкой',
+    file: 'src/api.ts',
+    from: '    registry.multiCandidate !== null && registry.multiCandidate > 0',
+    to: '    registry.multiCandidate === null || registry.multiCandidate > 0',
+    expect: 'модульный: отсутствие замера объявляется находкой',
+  },
+  {
+    name: 'словарь: ось ручки заведена мимо §4г (сверки состава не было вовсе)',
+    file: 'src/admin.ts',
+    from: "  'routing-identity-change',\n] as const;",
+    to: "  'routing-identity-change',\n  'routing-unhappy',\n] as const;",
+    expect: 'модульный: до 25.10 эта мутация не красила НИЧЕГО — сверялся только стиль',
+  },
+  {
     name: 'охват: /health снова объявляет ноль вместо «не считали» (QA-05)',
     file: 'src/server.ts',
     from: '      routed: summary === null ? null : summary.routed,\n      checked: summary === null ? null : summary.checked,',
