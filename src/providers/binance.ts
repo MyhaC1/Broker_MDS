@@ -29,6 +29,41 @@ interface BinanceTicker {
   s: string; // "BTCUSDT"
   c: string; // last price
   P: string; // price change percent
+  /**
+   * Лучшая цена покупки и лучшая цена продажи (MDS-12).
+   *
+   * **Объявлены по живому кадру, а не по документации.** Кадр снят 25.10 с
+   * `wss://stream.binance.com:9443/ws` тем же путём, каким ходит этот класс:
+   * в нём 23 ключа, читали мы 5, и `b`/`a` всё это время приходили и молча
+   * отбрасывались приведением к этому типу. Объявление разборщика не было
+   * свидетельством ни за, ни против — нужен был живой кадр, и он снят.
+   *
+   * Что `b`/`a` — именно лучшие цены, а не узнано по букве: сверено с
+   * `<symbol>@bookTicker` (по определению best bid/offer) на одном сокете,
+   * совпадение до нуля по обеим величинам.
+   *
+   * Поля необязательные, потому что обязательность здесь была бы
+   * утверждением о проводе: мы наблюдали их в 471 кадре из 471, но «всегда»
+   * из этого не следует.
+   */
+  b?: string; // best bid price
+  a?: string; // best ask price
+}
+
+/**
+ * Лучшая цена с одной стороны стакана. `null` — поля нет или значение
+ * непригодно.
+ *
+ * Ноль и отрицательное отвергаются **как значение, а не как форма**:
+ * нулевая цена покупки означала бы сделку по нулю, отрицательная — то же с
+ * другой стороны. Отсутствие поля и непригодное значение дают одно `null`
+ * намеренно: наружу оба означают «лучшей цены у нас нет».
+ */
+function bestPrice(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const value = Number.parseFloat(raw);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value;
 }
 
 export type ProviderStatus = 'connecting' | 'connected' | 'reconnecting';
@@ -52,6 +87,26 @@ export function normalizeTick(
   const price = Number.parseFloat(data.c);
   const changePercent = Number.parseFloat(data.P);
   if (!Number.isFinite(price) || !Number.isFinite(changePercent)) return null;
+
+  /*
+    Лучшие цены разбираются ПОСЛЕ барьера отказа и своего барьера не
+    образуют: негодный стакан тик не отбрасывает. Цена известна, лучшие
+    цены — нет, и это выразимо (MDS-12).
+
+    Перекрещённый стакан (`bid > ask`) снимает ОБЕ стороны, а не ту, что
+    выглядит хуже: при перекрестье известно, что одна из величин неверна, и
+    неизвестно какая. Оставить «лучшую» значило бы выбрать наугад и выдать
+    выбор за знание. На живом рынке не наблюдалось ни разу (0 из 471
+    кадра), поэтому ветка дешёвая — но без неё свойство было бы «сошлось с
+    оговоркой», а это не «сошлось».
+  */
+  let bid = bestPrice(data.b);
+  let ask = bestPrice(data.a);
+  if (bid !== null && ask !== null && bid > ask) {
+    bid = null;
+    ask = null;
+  }
+
   return {
     symbol: instrument.symbol,
     name: instrument.name,
@@ -59,6 +114,8 @@ export function normalizeTick(
     price,
     digits: instrument.digits,
     changePercent,
+    bid,
+    ask,
     ts: data.E,
     source: sourceId,
   };

@@ -53,6 +53,12 @@ export interface MdsServerDeps {
   now?: () => number;
   /** Период пересчёта маршрутизации (failover по тишине). */
   routingRecheckMs?: number;
+  /**
+   * Снят ли запрет на правку, меняющую личность ведущего источника (Р-318).
+   * Необязателен **только для тестов**; боевой запуск передаёт его из
+   * конфигурации, и умолчание здесь — запрещено, а не разрешено.
+   */
+  allowRoutingIdentityChange?: boolean;
   /** Не создавать живых адаптеров: для тестов проводки без сети. */
   providerFactory?: ProviderFactory;
 }
@@ -268,6 +274,7 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
     const resolved = resolveRouting(deps.catalog, next, { silent: silentProviders(next), sticky });
     const { invalidate, changed } = diffRouting(table, resolved);
     table = resolved;
+    announceMultiCandidate(resolved);
     sticky.clear();
     for (const [symbol, providerId] of resolved.failedOver) sticky.set(symbol, providerId);
 
@@ -286,6 +293,39 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
     return { invalidated, changed, started, stopped, missingKeys: [...missingKeys] };
   }
 
+  /**
+   * Тревога на число символов с двумя и более кандидатами (Р-317).
+   *
+   * **Зачем она, если есть запрет.** Запрет закрывает служебную ручку, но
+   * реестр меняется не только ей: он читается из файла на старте, и при
+   * невыданном `MDS_ADMIN_TOKEN` правка файла — штатный и единственный путь.
+   * Отказать на старте нельзя — это значит остановить котировки из-за
+   * правки, которая уже сделана. Поэтому здесь не отказ, а крик: стартуем и
+   * кричим.
+   *
+   * Кричим **на переходе**, а не на каждом пересчёте: пересчёт идёт раз в
+   * `routingRecheckMs`, и тревога, повторяемая каждые пять секунд, перестаёт
+   * читаться на второй минуте. Возврат к нулю объявляется тоже — иначе
+   * «починили» неотличимо от «перестали смотреть».
+   */
+  let lastMultiCandidate: number | null = null;
+  function announceMultiCandidate(next: RoutingTable): void {
+    const value = summarizeRouting(next).multiCandidate;
+    if (value === lastMultiCandidate) return;
+    const was = lastMultiCandidate;
+    lastMultiCandidate = value;
+    if (value > 0) {
+      console.warn(
+        `[mds] ТРЕВОГА: у ${value} символов больше одного кандидата в источники ` +
+          `(было ${was ?? 'не считано'}). Смена источника на живом символе стала возможна, ` +
+          'а потребитель показывает её очередным тиком — скачком цены как движением рынка. ' +
+          'Пока витрина не умеет показывать разрыв ряда, второй источник на категорию включать нельзя.',
+      );
+    } else if (was !== null && was > 0) {
+      console.info('[mds] тревога снята: у каждого символа снова ровно один кандидат в источники.');
+    }
+  }
+
   function recheck(): ApplyResult | null {
     if (!registry) return null;
     missingKeys = providersWithoutKey(registry);
@@ -293,6 +333,7 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
     const { invalidate, changed } = diffRouting(table, resolved);
     if (changed.length === 0) return null;
     table = resolved;
+    announceMultiCandidate(resolved);
     for (const [symbol, providerId] of resolved.failedOver) sticky.set(symbol, providerId);
     const { started, stopped } = syncProviders(resolved, registry);
     const invalidated = hub.invalidate(invalidate);
@@ -336,6 +377,7 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
       // обязаны говорить одинаково).
       routed: summary === null ? null : summary.routed,
       checked: summary === null ? null : summary.checked,
+      multiCandidate: summary === null ? null : summary.multiCandidate,
       missingKeys: [...missingKeys],
     };
   }
@@ -451,7 +493,15 @@ export function createMdsServer(deps: MdsServerDeps): MdsServer {
         typeof (body.value as Record<string, unknown>)?.updatedBy === 'string'
           ? String((body.value as Record<string, unknown>).updatedBy).slice(0, 120)
           : 'unnamed';
-      const outcome = applyRegistryUpdate(registry, body.value, { now: new Date(now()), actor });
+      const outcome = applyRegistryUpdate(
+        registry,
+        body.value,
+        { now: new Date(now()), actor },
+        {
+          catalog: deps.catalog,
+          allowIdentityChange: deps.allowRoutingIdentityChange ?? false,
+        },
+      );
       if (!outcome.ok) {
         audit.record({
           at: new Date(now()).toISOString(),

@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { applyRegistryUpdate } from './admin.js';
 import { builtinRegistry, type ProviderEntry, type Registry } from './registry.js';
 import { loadRegistry } from './registry-store.js';
 import { createMdsServer, type MdsServer, type RunningProvider } from './server.js';
@@ -75,6 +76,11 @@ interface Harness {
   base: string;
   /** Подать тик от имени источника — как если бы он прилетел из сети. */
   tick(providerId: string, symbol: string, price: number, ts?: number): void;
+  /**
+   * Тик без стакана — так выглядит всё, что приходит от второго
+   * поставщика: цена есть, лучших цен нет (MDS-12).
+   */
+  tickWithoutBook(providerId: string, symbol: string, price: number): void;
   /** Что сейчас назначено источнику. */
   assigned(providerId: string): string[];
   setClock(ms: number): void;
@@ -96,6 +102,11 @@ async function boot(options: {
   staleAfterMs?: number | null;
   keys?: Map<string, string>;
   catalogSource?: string;
+  /**
+   * Умолчание здесь **то же, что в бою** — запрещено. Стенд, по умолчанию
+   * разрешающий то, что в бою запрещено, проверяет не ту систему.
+   */
+  allowRoutingIdentityChange?: boolean;
 }): Promise<Harness> {
   let clock = 1_800_000_000_000;
   const emitters = new Map<string, (q: Quote) => void>();
@@ -115,6 +126,13 @@ async function boot(options: {
         : { origin, registry, path },
     staleAfterMs: options.staleAfterMs === undefined ? STALE_AFTER : options.staleAfterMs,
     adminToken: 'adminToken' in options ? options.adminToken : TOKEN,
+    // Поле НЕ передаётся, когда его не просили: иначе боевое умолчание
+    // (`?? false` в server.ts) не исполняется ни разу, и мутация «умолчание
+    // разрешает» не красит ничего — проверено, именно так и вышло.
+    // Стенд, подставляющий значение за боевой код, проверяет не ту систему.
+    ...('allowRoutingIdentityChange' in options
+      ? { allowRoutingIdentityChange: options.allowRoutingIdentityChange }
+      : {}),
     keys: options.keys ?? new Map(),
     now: () => clock,
     routingRecheckMs: 1_000_000, // пересчёт зовём руками, чтобы не ловить гонку
@@ -154,7 +172,29 @@ async function boot(options: {
         price,
         digits: entry.digits,
         changePercent: 0,
+        // Лучшие цены несимметричны вокруг цены нарочно: симметричный спред
+        // прошёл бы и при перепутанных местами полях.
+        bid: price - 0.3,
+        ask: price + 0.7,
         ts: ts ?? clock,
+        source: providerId,
+      });
+    },
+    tickWithoutBook(providerId, symbol, price) {
+      const emit = emitters.get(providerId);
+      if (!emit) throw new Error(`источник ${providerId} не запущен — тик подавать некому`);
+      lastTick.set(providerId, clock);
+      const entry = CATALOG.find((i) => i.symbol === symbol && i.provider === providerId)!;
+      emit({
+        symbol,
+        name: entry.name,
+        category: entry.category,
+        price,
+        digits: entry.digits,
+        changePercent: 0,
+        bid: null,
+        ask: null,
+        ts: clock,
         source: providerId,
       });
     },
@@ -307,11 +347,118 @@ describe('служебная ручка · приём изменения', () =>
     expect(entries[1]?.outcome).toBe('rejected:version-conflict');
   });
 
+  /*
+    Запрет на смену личности ведущего (Р-318, §4г).
+
+    Проверяется ОБЕ стороны, и вторая не менее важна первой: сторож,
+    красящий законное, отключают первым, и чинят тогда сторожа, а не текст.
+    Законных правок здесь три — включение, выключение и перестановка
+    приоритета, не меняющая победителя, — и ни одна не должна споткнуться.
+  */
+  it('правка меняет личность ведущего → 409 routing-identity-change, реестр не тронут', async () => {
+    const h = await boot({});
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 5 } : p));
+    const res = await put(h, next);
+    expect(res.status).toBe(409);
+    const body = await asJson(res);
+    expect(body.error).toBe('routing-identity-change');
+    // Правка отклонена целиком: версия не поднялась, источник прежний.
+    expect(h.server.registry()?.version).toBe(0);
+    expect(h.server.routing()?.routes.get('XAUUSD')?.leader?.providerId).toBe('twelvedata');
+  });
+
+  it('отказ называет символ и ОБЕ личности, а не только то, что «нельзя»', () => {
+    // Отказ без имён отправляет чинить вслепую: оператор видит «отклонено»
+    // и не знает, какую строку своей правки убирать.
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 5 } : p));
+    const outcome = applyRegistryUpdate(
+      twoSourceRegistry(),
+      { ...next, version: 0 },
+      { now: new Date(0), actor: 'тест' },
+      { catalog: CATALOG, allowIdentityChange: false },
+    );
+    expect(outcome.ok).toBe(false);
+    const detail = outcome.ok ? '' : outcome.detail;
+    expect(detail).toContain('XAUUSD');
+    expect(detail).toContain('twelvedata');
+    expect(detail).toContain('metals-alt');
+    // И оговорка про живой каталог: без неё отказ выглядит необъяснимым,
+    // когда биржа сама добавит пару и вчерашняя правка перестанет проходить.
+    expect(detail).toContain('ЖИВОМУ каталогу');
+  });
+
+  it('УМОЛЧАНИЕ — ЗАПРЕЩЕНО: поле не передано вовсе, запрет всё равно работает', async () => {
+    // Проверяется именно боевое умолчание, а не то, что подставил стенд:
+    // переключатель, открытый по умолчанию, — это отсутствующий запрет с
+    // видимостью запрета, и увидеть его отсутствие можно только здесь.
+    const h = await boot({});
+    expect('allowRoutingIdentityChange' in {}).toBe(false);
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 5 } : p));
+    const res = await put(h, next);
+    expect(res.status).toBe(409);
+    expect((await asJson(res)).error).toBe('routing-identity-change');
+  });
+
+  it('переключатель снят → та же правка проходит: запрет не вечный, а ожидание', async () => {
+    const h = await boot({ allowRoutingIdentityChange: true });
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 5 } : p));
+    expect((await put(h, next)).status).toBe(200);
+    expect(h.server.routing()?.routes.get('XAUUSD')?.leader?.providerId).toBe('metals-alt');
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: выключение источника — конец ряда, а не подмена', async () => {
+    const h = await boot({});
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'binance' ? { ...p, enabled: false } : p));
+    expect((await put(h, next)).status).toBe(200);
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: включение источника — новый ряд, а не подмена', async () => {
+    const off = twoSourceRegistry();
+    off.providers = off.providers.map((p) => (p.id === 'binance' ? { ...p, enabled: false } : p));
+    const h = await boot({ registry: off });
+    expect((await put(h, { ...twoSourceRegistry(), version: 0 })).status).toBe(200);
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: приоритет изменён, но победитель прежний', async () => {
+    const h = await boot({});
+    const next = twoSourceRegistry();
+    // metals-alt был 30, стал 29 — всё ещё позади twelvedata (20).
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 29 } : p));
+    expect((await put(h, next)).status).toBe(200);
+    expect(h.server.routing()?.routes.get('XAUUSD')?.leader?.providerId).toBe('twelvedata');
+  });
+
   it('реестр не прочитан → правку не принимаем вслепую (503), а не пишем поверх', async () => {
     const h = await boot({ origin: 'error' });
     const res = await put(h, twoSourceRegistry());
     expect(res.status).toBe(503);
     expect((await asJson(res)).error).toBe('registry-unreadable');
+  });
+});
+
+describe('лучшие цены на проводе · сквозь весь сервис (MDS-12)', () => {
+  it('bid и ask доезжают до /v1/quotes, а не теряются между хабом и ручкой', async () => {
+    const h = await boot({});
+    h.tick('binance', 'BTCUSD', 70_000);
+    const body = await asJson(await fetch(`${h.base}/v1/quotes?symbols=BTCUSD`));
+    expect(body.items[0]?.bid).toBe(69_999.7);
+    expect(body.items[0]?.ask).toBe(70_000.7);
+  });
+
+  it('пустые лучшие цены ПРИСУТСТВУЮТ в теле со значением null, а не исчезают', async () => {
+    // «Поля нет» и «поле пустое» — разные сообщения: первое читается как
+    // «сосед ещё не шлёт», второе как «шлёт, и у него этого нет».
+    const h = await boot({});
+    h.tickWithoutBook('twelvedata', 'XAUUSD', 2_400);
+    const body = await asJson(await fetch(`${h.base}/v1/quotes?symbols=XAUUSD`));
+    expect(body.items[0]?.price).toBe(2_400);
+    expect(body.items[0]).toHaveProperty('bid', null);
+    expect(body.items[0]).toHaveProperty('ask', null);
   });
 });
 
@@ -338,7 +485,13 @@ describe('переключение провайдера · что происхо
   });
 
   it('смена ведущего источника стирает цену прежнего, а не продолжает ею ряд', async () => {
-    const h = await boot({});
+    // Переключатель снят НАРОЧНО (Р-318): с 25.10 ровно такая правка
+    // отклоняется кодом `routing-identity-change`, пока витрина не умеет
+    // показывать разрыв ряда. Проверяемое здесь поведение — что происходит
+    // с ценой, КОГДА смена всё-таки разрешена, — от запрета не зависит и
+    // обязано пережить его снятие. Без явного снятия этот тест проверял бы
+    // запрет, а не инвалидацию.
+    const h = await boot({ allowRoutingIdentityChange: true });
     h.tick('twelvedata', 'XAUUSD', 2_400);
     expect((await asJson(await fetch(`${h.base}/v1/quotes?symbols=XAUUSD`))).items[0]?.source).toBe(
       'twelvedata',

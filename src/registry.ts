@@ -367,6 +367,53 @@ export function diffRouting(
   return { invalidate, changed };
 }
 
+/** Символ, у которого правка реестра меняет **личность** ведущего источника. */
+export interface LeaderIdentityChange {
+  symbol: string;
+  from: string;
+  to: string;
+}
+
+/**
+ * Какие символы сменят личность ведущего, если применить `next` вместо
+ * `current` (Р-318, `КОНТРАКТЫ.md` §4г).
+ *
+ * **Почему личность, а не число кандидатов.** Слабая форма — «у символа
+ * станет больше одного кандидата» — на перестановке `categoryPrecedence` не
+ * срабатывает вовсе: кандидат там один и до, и после, меняется лишь то,
+ * какая строка каталога выиграла столкновение имён. А это единственный путь,
+ * которым правка **данных** сегодня меняет происхождение живого символа:
+ * измерено 25.10, ровно один символ, `EURUSD: twelvedata → binance`.
+ *
+ * **Почему нужен каталог.** «Кто ведёт символ» — свойство реестра **×
+ * каталога**, из одного реестра оно не вычисляется. Отсюда и оговорка,
+ * обязательная в тексте отказа: предикат считается по ЖИВОМУ каталогу,
+ * вселенная биржи меняется сама, и правка, принятая вчера, может быть
+ * отклонена завтра.
+ *
+ * **Обе стороны считаются без рантайма** — без множества молчащих и без
+ * залипания. Вопрос здесь «что меняет сама правка», а не «что происходит
+ * сейчас»: подмешать молчание значило бы записать failover в вину правке и
+ * сделать приговор зависящим от секунды, в которую нажали кнопку.
+ *
+ * Появление и исчезновение источника (`null` с любой стороны) сменой
+ * личности НЕ считается: включение источника — это новый ряд, выключение —
+ * конец ряда, и ни то ни другое не выдаёт чужую цену за продолжение своей.
+ */
+export function leaderIdentityChanges(
+  instruments: CatalogInstrument[],
+  current: Registry,
+  next: Registry,
+): LeaderIdentityChange[] {
+  const before = resolveRouting(instruments, current);
+  const after = resolveRouting(instruments, next);
+  const out: LeaderIdentityChange[] = [];
+  for (const { symbol, from, to } of diffRouting(before, after).changed) {
+    if (from !== null && to !== null) out.push({ symbol, from, to });
+  }
+  return out;
+}
+
 /** Сводка покрытия. Единица названа в поле `unit` — число без единицы нечестно. */
 export interface RoutingSummary {
   unit: 'канонических символов каталога после разрешения коллизий';
@@ -375,6 +422,25 @@ export interface RoutingSummary {
   byReason: Record<RouteReason, number>;
   byProvider: { providerId: string; symbols: number }[];
   hiddenByCollision: number;
+  /**
+   * Символов, у которых кандидатов больше одного (Р-317).
+   *
+   * **Это не покрытие, а тревога.** Считается здесь потому, что здесь
+   * единственное место, где кандидаты всех символов видны разом.
+   *
+   * Смысл числа: пока оно ноль, происхождение тика у символа — величина
+   * постоянная, и потребитель, не умеющий показывать разрыв ряда, ничего
+   * не теряет. Как только оно перестаёт быть нулём, смена источника на
+   * живом символе становится возможной, а у потребителя она выглядит
+   * очередным тиком — то есть скачком цены, выданным за движение рынка.
+   *
+   * Ноль здесь — **измеренная величина, а не тишина**: без числа «кандидат
+   * у всех один» неотличимо от «мы не смотрели». Замер 25.10 на живом
+   * каталоге (531 строка) со встроенным умолчанием дал 0, и ни одна строка
+   * кода этот ноль не держит — он свойство данных. Поэтому у него тревога,
+   * а не комментарий.
+   */
+  multiCandidate: number;
 }
 
 export function summarizeRouting(table: RoutingTable): RoutingSummary {
@@ -387,10 +453,15 @@ export function summarizeRouting(table: RoutingTable): RoutingSummary {
   };
   let routed = 0;
   let hidden = 0;
+  let multiCandidate = 0;
   for (const route of table.routes.values()) {
     byReason[route.reason] += 1;
     if (route.leader) routed += 1;
     hidden += route.hiddenByCollision.length;
+    // Считаем ВСЕХ кандидатов, включая выключенных: выключенный источник —
+    // это один `PUT` до включённого, и тревога обязана сработать до правки,
+    // а не после неё.
+    if (route.candidates.length > 1) multiCandidate += 1;
   }
   return {
     unit: 'канонических символов каталога после разрешения коллизий',
@@ -399,5 +470,6 @@ export function summarizeRouting(table: RoutingTable): RoutingSummary {
     byReason,
     byProvider: [...table.byProvider].map(([providerId, list]) => ({ providerId, symbols: list.length })),
     hiddenByCollision: hidden,
+    multiCandidate,
   };
 }
