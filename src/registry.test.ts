@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   builtinRegistry,
   diffRouting,
+  leaderIdentityChanges,
   registrySchema,
   resolveRouting,
   summarizeRouting,
@@ -130,6 +131,80 @@ describe('реестр · два провайдера на один символ
     expect(route.reason).toBe('silent');
     // Не `no-source` и не `source-disabled`: источник есть и включён, он молчит.
     expect(route.leader).not.toBeNull();
+  });
+});
+
+describe('реестр · тревога «кандидатов больше одного» (Р-317)', () => {
+  it('число считается и называется, а не подразумевается нулём', () => {
+    // Ноль, которого не считали, неотличим от нуля измеренного. Здесь
+    // величина заведомо НЕ ноль: вырожденная фикстура дала бы зелёный цвет
+    // при любой формуле подсчёта.
+    const summary = summarizeRouting(resolveRouting(CATALOG, registry(), quiet));
+    // XAUUSD — единственный символ с двумя кандидатами. У EURUSD кандидат
+    // один: столкновение имён решено категорией ДО выбора источника.
+    expect(summary.multiCandidate).toBe(1);
+  });
+
+  it('выключенный кандидат считается тоже: он один PUT до включённого', () => {
+    const reg = registry();
+    reg.providers = reg.providers.map((p) => (p.id === 'metals-alt' ? { ...p, enabled: false } : p));
+    expect(summarizeRouting(resolveRouting(CATALOG, reg, quiet)).multiCandidate).toBe(1);
+  });
+
+  it('второго кандидата нет ни у кого → ровно ноль, и это измеренный ноль', () => {
+    const single = CATALOG.filter((i) => i.provider !== 'metals-alt');
+    expect(summarizeRouting(resolveRouting(single, registry(), quiet)).multiCandidate).toBe(0);
+  });
+});
+
+describe('реестр · смена ЛИЧНОСТИ ведущего, а не числа кандидатов (Р-318)', () => {
+  it('перестановка приоритета категорий меняет личность, а число кандидатов — нет', () => {
+    // Измеренный 25.10 путь: единственный способ правкой ДАННЫХ подменить
+    // источник живому символу. Кандидат у EURUSD один и до, и после —
+    // поэтому слабая форма («стало больше одного кандидата») молчит здесь
+    // полностью, а сторож обязан сработать. Это и есть довод за личность.
+    const before = registry();
+    const after = registry({
+      categoryPrecedence: ['crypto', 'forex', 'metals', 'indices', 'stocks', 'energy'],
+    });
+    expect(summarizeRouting(resolveRouting(CATALOG, after, quiet)).multiCandidate).toBe(
+      summarizeRouting(resolveRouting(CATALOG, before, quiet)).multiCandidate,
+    );
+    expect(leaderIdentityChanges(CATALOG, before, after)).toEqual([
+      { symbol: 'EURUSD', from: 'twelvedata', to: 'binance' },
+    ]);
+  });
+
+  it('приоритет источника переставлен → личность ведущего меняется', () => {
+    const after = registry();
+    after.providers = after.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 5 } : p));
+    expect(leaderIdentityChanges(CATALOG, registry(), after)).toEqual([
+      { symbol: 'XAUUSD', from: 'twelvedata', to: 'metals-alt' },
+    ]);
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: выключение — конец ряда, а не подмена личности', () => {
+    const after = registry();
+    after.providers = after.providers.map((p) => (p.id === 'binance' ? { ...p, enabled: false } : p));
+    expect(leaderIdentityChanges(CATALOG, registry(), after)).toEqual([]);
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: включение — новый ряд, а не подмена личности', () => {
+    const before = registry();
+    before.providers = before.providers.map((p) => (p.id === 'binance' ? { ...p, enabled: false } : p));
+    expect(leaderIdentityChanges(CATALOG, before, registry())).toEqual([]);
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: приоритет изменён, победитель прежний', () => {
+    const after = registry();
+    after.providers = after.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 29 } : p));
+    expect(leaderIdentityChanges(CATALOG, registry(), after)).toEqual([]);
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: правка, не трогающая маршрутизацию вовсе', () => {
+    const after = registry();
+    after.providers = after.providers.map((p) => ({ ...p, label: `${p.label} (переименован)` }));
+    expect(leaderIdentityChanges(CATALOG, registry(), after)).toEqual([]);
   });
 });
 

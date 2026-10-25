@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { applyRegistryUpdate } from './admin.js';
 import { builtinRegistry, type ProviderEntry, type Registry } from './registry.js';
 import { loadRegistry } from './registry-store.js';
 import { createMdsServer, type MdsServer, type RunningProvider } from './server.js';
@@ -96,6 +97,11 @@ async function boot(options: {
   staleAfterMs?: number | null;
   keys?: Map<string, string>;
   catalogSource?: string;
+  /**
+   * Умолчание здесь **то же, что в бою** — запрещено. Стенд, по умолчанию
+   * разрешающий то, что в бою запрещено, проверяет не ту систему.
+   */
+  allowRoutingIdentityChange?: boolean;
 }): Promise<Harness> {
   let clock = 1_800_000_000_000;
   const emitters = new Map<string, (q: Quote) => void>();
@@ -115,6 +121,7 @@ async function boot(options: {
         : { origin, registry, path },
     staleAfterMs: options.staleAfterMs === undefined ? STALE_AFTER : options.staleAfterMs,
     adminToken: 'adminToken' in options ? options.adminToken : TOKEN,
+    allowRoutingIdentityChange: options.allowRoutingIdentityChange ?? false,
     keys: options.keys ?? new Map(),
     now: () => clock,
     routingRecheckMs: 1_000_000, // пересчёт зовём руками, чтобы не ловить гонку
@@ -307,6 +314,79 @@ describe('служебная ручка · приём изменения', () =>
     expect(entries[1]?.outcome).toBe('rejected:version-conflict');
   });
 
+  /*
+    Запрет на смену личности ведущего (Р-318, §4г).
+
+    Проверяется ОБЕ стороны, и вторая не менее важна первой: сторож,
+    красящий законное, отключают первым, и чинят тогда сторожа, а не текст.
+    Законных правок здесь три — включение, выключение и перестановка
+    приоритета, не меняющая победителя, — и ни одна не должна споткнуться.
+  */
+  it('правка меняет личность ведущего → 409 routing-identity-change, реестр не тронут', async () => {
+    const h = await boot({});
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 5 } : p));
+    const res = await put(h, next);
+    expect(res.status).toBe(409);
+    const body = await asJson(res);
+    expect(body.error).toBe('routing-identity-change');
+    // Правка отклонена целиком: версия не поднялась, источник прежний.
+    expect(h.server.registry()?.version).toBe(0);
+    expect(h.server.routing()?.routes.get('XAUUSD')?.leader?.providerId).toBe('twelvedata');
+  });
+
+  it('отказ называет символ и ОБЕ личности, а не только то, что «нельзя»', () => {
+    // Отказ без имён отправляет чинить вслепую: оператор видит «отклонено»
+    // и не знает, какую строку своей правки убирать.
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 5 } : p));
+    const outcome = applyRegistryUpdate(
+      twoSourceRegistry(),
+      { ...next, version: 0 },
+      { now: new Date(0), actor: 'тест' },
+      { catalog: CATALOG, allowIdentityChange: false },
+    );
+    expect(outcome.ok).toBe(false);
+    const detail = outcome.ok ? '' : outcome.detail;
+    expect(detail).toContain('XAUUSD');
+    expect(detail).toContain('twelvedata');
+    expect(detail).toContain('metals-alt');
+    // И оговорка про живой каталог: без неё отказ выглядит необъяснимым,
+    // когда биржа сама добавит пару и вчерашняя правка перестанет проходить.
+    expect(detail).toContain('ЖИВОМУ каталогу');
+  });
+
+  it('переключатель снят → та же правка проходит: запрет не вечный, а ожидание', async () => {
+    const h = await boot({ allowRoutingIdentityChange: true });
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 5 } : p));
+    expect((await put(h, next)).status).toBe(200);
+    expect(h.server.routing()?.routes.get('XAUUSD')?.leader?.providerId).toBe('metals-alt');
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: выключение источника — конец ряда, а не подмена', async () => {
+    const h = await boot({});
+    const next = twoSourceRegistry();
+    next.providers = next.providers.map((p) => (p.id === 'binance' ? { ...p, enabled: false } : p));
+    expect((await put(h, next)).status).toBe(200);
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: включение источника — новый ряд, а не подмена', async () => {
+    const off = twoSourceRegistry();
+    off.providers = off.providers.map((p) => (p.id === 'binance' ? { ...p, enabled: false } : p));
+    const h = await boot({ registry: off });
+    expect((await put(h, { ...twoSourceRegistry(), version: 0 })).status).toBe(200);
+  });
+
+  it('МОЛЧИТ НА ЗАКОННОМ: приоритет изменён, но победитель прежний', async () => {
+    const h = await boot({});
+    const next = twoSourceRegistry();
+    // metals-alt был 30, стал 29 — всё ещё позади twelvedata (20).
+    next.providers = next.providers.map((p) => (p.id === 'metals-alt' ? { ...p, priority: 29 } : p));
+    expect((await put(h, next)).status).toBe(200);
+    expect(h.server.routing()?.routes.get('XAUUSD')?.leader?.providerId).toBe('twelvedata');
+  });
+
   it('реестр не прочитан → правку не принимаем вслепую (503), а не пишем поверх', async () => {
     const h = await boot({ origin: 'error' });
     const res = await put(h, twoSourceRegistry());
@@ -338,7 +418,13 @@ describe('переключение провайдера · что происхо
   });
 
   it('смена ведущего источника стирает цену прежнего, а не продолжает ею ряд', async () => {
-    const h = await boot({});
+    // Переключатель снят НАРОЧНО (Р-318): с 25.10 ровно такая правка
+    // отклоняется кодом `routing-identity-change`, пока витрина не умеет
+    // показывать разрыв ряда. Проверяемое здесь поведение — что происходит
+    // с ценой, КОГДА смена всё-таки разрешена, — от запрета не зависит и
+    // обязано пережить его снятие. Без явного снятия этот тест проверял бы
+    // запрет, а не инвалидацию.
+    const h = await boot({ allowRoutingIdentityChange: true });
     h.tick('twelvedata', 'XAUUSD', 2_400);
     expect((await asJson(await fetch(`${h.base}/v1/quotes?symbols=XAUUSD`))).items[0]?.source).toBe(
       'twelvedata',

@@ -29,6 +29,7 @@ function health(over: Partial<HealthInput> = {}) {
       providers: [{ id: 'binance', enabled: true, silent: false }],
       routed: 484,
       checked: 484,
+      multiCandidate: 0,
       missingKeys: [],
     },
     clients: 0,
@@ -304,6 +305,7 @@ describe('/health · состояние реестра провайдеров', 
         providers: [],
         routed: 0,
         checked: 0,
+        multiCandidate: 0,
         missingKeys: [],
       },
     });
@@ -325,6 +327,7 @@ describe('/health · состояние реестра провайдеров', 
         providers: [],
         routed: null,
         checked: null,
+        multiCandidate: null,
         missingKeys: [],
       },
     });
@@ -345,6 +348,7 @@ describe('/health · состояние реестра провайдеров', 
         providers: [{ id: 'binance', enabled: false, silent: false }],
         routed: 0,
         checked: 484,
+        multiCandidate: 0,
         missingKeys: [],
       },
     });
@@ -352,9 +356,61 @@ describe('/health · состояние реестра провайдеров', 
     expect(body.registry.checked).toBe(484);
   });
 
+  /*
+    Тревога «кандидатов больше одного» (Р-317).
+
+    Главное здесь — что она НЕ снимает сервис с раздачи. `degraded` отвечает
+    503, то есть выводит MDS из-под балансировщика; останавливать исправную
+    службу из-за настройки хуже самого дефекта, и такую тревогу отключат
+    первой. Поэтому проверяется и то, что тревога видна, и то, что статус
+    от неё не поменялся.
+  */
+  it('кандидатов больше одного → тревога в ответе, но статус ok и 200', () => {
+    const { httpStatus, body } = health({
+      registry: {
+        origin: 'file',
+        version: 3,
+        providers: [{ id: 'binance', enabled: true, silent: false }],
+        routed: 484,
+        checked: 484,
+        multiCandidate: 7,
+        missingKeys: [],
+      },
+    });
+    expect(httpStatus).toBe(200);
+    expect(body.status).toBe('ok');
+    expect(body.warning).toContain('7');
+    expect(body.warning).toContain('скачком цены');
+    // И это не `reason`: два поля с разным смыслом, а не одно на оба случая.
+    expect(body.reason).toBeUndefined();
+  });
+
+  it('кандидат у всех один → тревоги нет вовсе, а не пустая строка', () => {
+    expect(health().body.warning).toBeUndefined();
+  });
+
+  it('маршрутизации нет → «не считали», и это НЕ тревога', () => {
+    // `null` не тревожит: отсутствие замера — не находка. Иначе нечитаемый
+    // реестр поднимал бы тревогу не о том, и чинить пошли бы не туда.
+    const { body } = health({
+      registry: {
+        origin: 'error',
+        error: 'JSON: сломан',
+        version: null,
+        providers: [],
+        routed: null,
+        checked: null,
+        multiCandidate: null,
+        missingKeys: [],
+      },
+    });
+    expect(body.warning).toBeUndefined();
+    expect(body.reason).toContain('не прочитан');
+  });
+
   it('пустой реестр ≠ выключенный источник — это разные причины', () => {
     const empty = health({
-      registry: { origin: 'file', version: 1, providers: [], routed: 0, checked: 0, missingKeys: [] },
+      registry: { origin: 'file', version: 1, providers: [], routed: 0, checked: 0, multiCandidate: 0, missingKeys: [] },
     });
     const disabled = health({
       registry: {
@@ -363,6 +419,7 @@ describe('/health · состояние реестра провайдеров', 
         providers: [{ id: 'binance', enabled: false, silent: false }],
         routed: 0,
         checked: 484,
+        multiCandidate: 0,
         missingKeys: [],
       },
     });
@@ -379,6 +436,7 @@ describe('/health · состояние реестра провайдеров', 
         providers: [{ id: 'twelvedata', enabled: true, silent: true }],
         routed: 17,
         checked: 484,
+        multiCandidate: 0,
         missingKeys: ['twelvedata'],
       },
     });
@@ -395,6 +453,7 @@ describe('/health · состояние реестра провайдеров', 
         providers: [{ id: 'binance', enabled: true, silent: false }],
         routed: 484,
         checked: 484,
+        multiCandidate: 0,
         missingKeys: [],
       },
     });

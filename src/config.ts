@@ -78,6 +78,19 @@ export const config = {
    */
   routingRecheckMs: Number(process.env.MDS_ROUTING_RECHECK_MS ?? 5_000),
 
+  /**
+   * Разрешить правку реестра, меняющую личность ведущего источника у живого
+   * символа (Р-318). **Умолчание — запрещено**, и это не осторожность:
+   * переключатель, открытый по умолчанию, есть отсутствующий запрет с
+   * видимостью запрета.
+   *
+   * Сравнение точное и по обрезанной строке. Истинность самой строки здесь
+   * не годится: непустая строка истинна любая, включая `'false'` и строку
+   * из пробелов, — то есть опечатка открывала бы запрет.
+   */
+  allowRoutingIdentityChange:
+    (process.env.MDS_ALLOW_ROUTING_IDENTITY_CHANGE ?? '').trim() === 'true',
+
   twelveData: {
     apiKey: process.env.TWELVEDATA_API_KEY ?? '',
     apiUrl: process.env.TWELVEDATA_API_URL ?? 'https://api.twelvedata.com',

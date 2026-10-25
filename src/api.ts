@@ -48,6 +48,22 @@ export interface RegistryHealthInput {
   routed: number | null;
   checked: number | null;
   /**
+   * Символов, у которых кандидатов в источники больше одного (Р-317).
+   * `null` — маршрутизации нет, то есть **не считали**, а не «насчитали
+   * ноль»: та же разница, что у `routed`.
+   *
+   * Поле стоит в ответе, а не только в журнале, по правилу «мера, не
+   * доезжающая до читателя, не существует»: крик в `stdout` видит тот, кто
+   * в него смотрит, а число в `/health` — наблюдение.
+   *
+   * **Почему это НЕ переводит службу в `degraded`.** `degraded` отвечает
+   * `503`, то есть снимает MDS с раздачи. Снимать сервис, у которого цены
+   * идут исправно, из-за настройки — хуже самого дефекта, и такую тревогу
+   * отключат первой. Поэтому тревога здесь — величина плюс отдельная строка
+   * `warning`, а не состояние службы.
+   */
+  multiCandidate: number | null;
+  /**
    * Включённые источники, которым нужен ключ, а ключа нет. Такой источник
    * не запущен вовсе, и без отдельного поля он выглядел бы просто молчащим —
    * то есть отказ настройки был бы неотличим от отказа сети.
@@ -91,6 +107,15 @@ export interface ProviderHealth {
 export interface HealthBody {
   status: 'ok' | 'degraded';
   reason?: string;
+  /**
+   * Тревога, которая **не снимает сервис с раздачи**. `reason` объясняет
+   * `degraded` и приходит с `503`; `warning` приходит с любым статусом,
+   * в том числе с `ok`, и означает «работает, но смотреть сюда».
+   *
+   * Разделение намеренное: сведя их в одно поле, мы получили бы выбор между
+   * «молчать о беде» и «останавливать исправную службу», и оба плохи.
+   */
+  warning?: string;
   quotes: { staleAfterMs: number | null; total: number; fresh: number | null };
   providers: ProviderHealth[];
   catalog: { source: string; instruments: number };
@@ -167,9 +192,19 @@ export function buildHealth(input: HealthInput): { httpStatus: 200 | 503; body: 
                   ? `у ${primary.name} нет ни одной котировки свежее ${staleAfterMs} мс`
                   : null;
 
+  // Тревога считается ОТДЕЛЬНО от `reason` и статуса — см. `warning`.
+  // `null` не тревожит: «не считали» — это не «насчитали много».
+  const warning =
+    registry.multiCandidate !== null && registry.multiCandidate > 0
+      ? `у ${registry.multiCandidate} символов больше одного кандидата в источники: ` +
+        'смена источника на живом символе возможна, а потребитель показывает её ' +
+        'очередным тиком — скачком цены как движением рынка (Р-317)'
+      : null;
+
   const body: HealthBody = {
     status: reason === null ? 'ok' : 'degraded',
     ...(reason === null ? {} : { reason }),
+    ...(warning === null ? {} : { warning }),
     quotes: {
       staleAfterMs,
       total: input.ages.length,
